@@ -98,30 +98,26 @@ static wr_buffer_t* allocate_write_buffer(int fd) {
 }
 
 
-static void flush_write_buffer(wr_buffer_t *buf) {
+static void flush_write_buffer(wr_buffer_t *wb) {
     static original_write_t original_write = NULL;
     if (!original_write) {
         original_write = dlsym(RTLD_NEXT, "write");
     }
 
-    if (buf->buffer_pos > 0 && buf->fd >= 0) {
-        ssize_t bytes = original_write(buf->fd, buf->buffer, buf->buffer_pos);
-        buf->buffer_pos = 0;
+    if (wb->buffer_pos > 0 && wb->fd >= 0) {
+        original_write(wb->fd, wb->buffer, wb->buffer_pos); // Possibly add error handling
+        wb->buffer_pos = 0;
     }
 }
 
 
-static void free_write_buffer(int fd) {
-    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
-        if (wr_buffers[i].fd == fd) {
-            flush_write_buffer(&wr_buffers[i]);
-            free(wr_buffers[i].buffer);
-            wr_buffers[i].buffer = NULL;
-            wr_buffers[i].fd = -1;
-            wr_buffers[i].buffer_pos = 0;
-            return;
-        }
-    }
+static void free_write_buffer(wr_buffer_t * wb) {
+    flush_write_buffer(wb);
+    free(wb->buffer);
+    wb->buffer = NULL;
+    wb->fd = -1;
+    wb->buffer_pos = 0;
+    return;
 }
 
 // Prefetch Buffer Management
@@ -153,17 +149,13 @@ static pf_buffer_t* allocate_prefetch_buffer(int fd) {
 }
 
 
-static void free_prefetch_buffer(int fd) {
-    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
-        if (pf_buffers[i].fd == fd) {
-            free(pf_buffers[i].buffer);
-            pf_buffers[i].buffer = NULL;
-            pf_buffers[i].fd = -1;
-            pf_buffers[i].buffer_pos = 0;
-            pf_buffers[i].data_size = 0;
-            return;
-        }
-    }
+static void free_prefetch_buffer(pf_buffer_t * pb) {
+    free(pb->buffer);
+    pb->buffer = NULL;
+    pb->fd = -1;
+    pb->buffer_pos = 0;
+    pb->data_size = 0;
+    return;
 }
 
 /*
@@ -212,8 +204,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
         flush_write_buffer(wb);
 
         if (count > WRITE_BUFFER_SIZE) {
-            ssize_t bytes = original_write(fd, buf, count);
-            return bytes;
+            return original_write(fd, buf, count);
         }
     }
     
@@ -293,8 +284,15 @@ int close(int fd) {
     static original_close_t original_close = NULL;
     if (!original_close) original_close = dlsym(RTLD_NEXT, "close");
 
-    free_write_buffer(fd);
-    free_prefetch_buffer(fd);
+    wr_buffer_t *wb = get_write_buffer(fd);
+    if (wb) {
+        free_write_buffer(wb);
+    }
+
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+    free_prefetch_buffer(pb);
+    }
 
     int result = original_close(fd);
 
