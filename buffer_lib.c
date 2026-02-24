@@ -106,7 +106,6 @@ static void flush_write_buffer(wr_buffer_t *buf) {
 
     if (buf->buffer_pos > 0 && buf->fd >= 0) {
         ssize_t bytes = original_write(buf->fd, buf->buffer, buf->buffer_pos);
-        fprintf(stderr, "Flushed %zu bytes to fd %d, wrote %zd bytes\n", buf->buffer_pos, buf->fd, bytes); // DEBUG
         buf->buffer_pos = 0;
     }
 }
@@ -188,18 +187,6 @@ int open(const char *path, int flags, ...) {
 
     va_end(args);
 
-    if (fd > 2) {
-        int access_mode = flags & O_ACCMODE;
-        
-        if (access_mode == O_WRONLY || access_mode == O_RDWR) {
-            allocate_write_buffer(fd);
-        }
-
-        if (access_mode == O_RDONLY || access_mode == O_RDWR) {
-            allocate_prefetch_buffer(fd);
-        }
-    }
-
     return fd;
 }
 
@@ -213,10 +200,12 @@ ssize_t write(int fd, const void *buf, size_t count) {
     }
 
     wr_buffer_t *wb = get_write_buffer(fd);
-    
+
     if (!wb) {
-        ssize_t bytes = original_write(fd, buf, count);
-        return bytes;
+        wb = allocate_write_buffer(fd);
+        if (!wb) {
+            return original_write(fd, buf, count);
+        }
     }
 
     if (wb->buffer_pos + count > WRITE_BUFFER_SIZE) {
@@ -227,7 +216,6 @@ ssize_t write(int fd, const void *buf, size_t count) {
             return bytes;
         }
     }
-    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
     
     memcpy(wb->buffer + wb->buffer_pos, buf, count);
     wb->buffer_pos += count;
@@ -243,9 +231,10 @@ ssize_t read(int fd, void *buf, size_t count) {
     pf_buffer_t *pb = get_prefetch_buffer(fd);
 
     if (!pb) {
-        ssize_t bytes = original_read(fd, buf, count);
-        printf("Read %zd bytes directly from fd %d\n", bytes, fd); // DEBUG
-        return bytes;
+        pb = allocate_prefetch_buffer(fd);
+        if (!pb) {
+            return original_read(fd, buf, count);
+        }
     }
 
     if (count <= pb->data_size - pb->buffer_pos) { // If requested data is in buffer
@@ -275,7 +264,6 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     if (needed > PREFETCH_BUFFER_SIZE) {
         ssize_t bytes = original_read(fd, out, needed);
-        printf("Read %zd bytes directly from fd %d\n", bytes, fd); // DEBUG
 
         if (bytes <= 0) {
             return total_read > 0 ? total_read : bytes; // Return what we have or the error
@@ -284,7 +272,6 @@ ssize_t read(int fd, void *buf, size_t count) {
         total_read += bytes;
     } else {
         ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
-        printf("Prefetched %zd bytes into buffer for fd %d\n", bytes, fd); // DEBUG
     
         if (bytes <= 0) {
             return total_read > 0 ? total_read : bytes;
@@ -300,6 +287,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     return total_read;
 }
+
 
 int close(int fd) {
     static original_close_t original_close = NULL;
