@@ -300,3 +300,28 @@ int close(int fd) {
 
     return result;
 }
+
+/*
+Clean up
+*/
+
+__attribute__((destructor)) static void cleanup_buffers() {
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
+        if (wr_buffers[i].buffer) {
+            flush_write_buffer(&wr_buffers[i]);
+            free(wr_buffers[i].buffer);
+            wr_buffers[i].buffer = NULL;
+            wr_buffers[i].fd = -1;
+            wr_buffers[i].buffer_pos = 0;
+        }
+    }
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
+        if (pf_buffers[i].buffer) {
+            free(pf_buffers[i].buffer);
+            pf_buffers[i].buffer = NULL;
+            pf_buffers[i].fd = -1;
+            pf_buffers[i].buffer_pos = 0;
+            pf_buffers[i].data_size = 0;
+        }
+    }
+}
