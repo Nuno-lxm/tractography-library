@@ -24,6 +24,7 @@ Function Pointer Types for Original System Calls
 
 typedef int (*original_open_t)(const char *path, int flags, ...);
 typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
+typedef ssize_t (*original_pwrite_t)(int fd, const void *buf, size_t count, off_t offset);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
 
@@ -46,6 +47,7 @@ typedef struct { // Prefetch Buffers
 
 static wr_buffer_t wr_buffers[MAX_WRITE_BUFFERS];
 static pf_buffer_t pf_buffers[MAX_PREFETCH_BUFFERS];
+
 
 __attribute__((constructor)) static void init_buffers() {
     for (int i = 0; i < MAX_WRITE_BUFFERS; i++) { // Initialize write buffers
@@ -162,6 +164,8 @@ static void free_prefetch_buffer(pf_buffer_t * pb) {
 Intercepted Functions
 */
 
+// File opening and closing
+
 int open(const char *path, int flags, ...) {
     static original_open_t original_open = NULL;
     if (!original_open) original_open = dlsym(RTLD_NEXT, "open");
@@ -182,6 +186,27 @@ int open(const char *path, int flags, ...) {
     return fd;
 }
 
+
+int close(int fd) {
+    static original_close_t original_close = NULL;
+    if (!original_close) original_close = dlsym(RTLD_NEXT, "close");
+
+    wr_buffer_t *wb = get_write_buffer(fd);
+    if (wb) {
+        free_write_buffer(wb);
+    }
+
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+    free_prefetch_buffer(pb);
+    }
+
+    int result = original_close(fd);
+
+    return result;
+}
+
+// Write operations
 
 ssize_t write(int fd, const void *buf, size_t count) {
     static original_write_t original_write = NULL;
@@ -213,6 +238,21 @@ ssize_t write(int fd, const void *buf, size_t count) {
     
     return count;
 }
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    static original_pwrite_t original_pwrite = NULL;
+    if (!original_pwrite) original_pwrite = dlsym(RTLD_NEXT, "pwrite");
+    
+    wr_buffer_t *wb = get_write_buffer(fd);
+    
+    if (wb && wb->buffer_pos > 0) {
+        flush_write_buffer(wb); // Flush before pwrite to maintain consistency
+    }
+
+    return original_pwrite(fd, buf, count, offset);
+}
+
+// Read operations
 
 
 ssize_t read(int fd, void *buf, size_t count) {
@@ -279,25 +319,6 @@ ssize_t read(int fd, void *buf, size_t count) {
     return total_read;
 }
 
-
-int close(int fd) {
-    static original_close_t original_close = NULL;
-    if (!original_close) original_close = dlsym(RTLD_NEXT, "close");
-
-    wr_buffer_t *wb = get_write_buffer(fd);
-    if (wb) {
-        free_write_buffer(wb);
-    }
-
-    pf_buffer_t *pb = get_prefetch_buffer(fd);
-    if (pb) {
-    free_prefetch_buffer(pb);
-    }
-
-    int result = original_close(fd);
-
-    return result;
-}
 
 /*
 Clean up
