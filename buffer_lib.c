@@ -1,0 +1,314 @@
+#define _GNU_SOURCE
+
+#include <stdio.h>
+#include <dlfcn.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+
+/*
+Configuration
+*/
+
+#define WRITE_BUFFER_SIZE 8
+#define MAX_WRITE_BUFFERS 5
+
+#define PREFETCH_BUFFER_SIZE 16
+#define MAX_PREFETCH_BUFFERS 5
+
+/*
+Function Pointer Types for Original System Calls
+*/
+
+typedef int (*original_open_t)(const char *path, int flags, ...);
+typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
+typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
+typedef int (*original_close_t)(int fd);
+
+/*
+Define Buffer Arrays
+*/
+
+typedef struct { // Write Buffers
+    int fd;
+    char *buffer;
+    size_t buffer_pos;
+} wr_buffer_t;
+
+typedef struct { // Prefetch Buffers
+    int fd;
+    char *buffer;
+    size_t buffer_pos;
+    size_t data_size;
+} pf_buffer_t;
+
+static wr_buffer_t wr_buffers[MAX_WRITE_BUFFERS];
+static pf_buffer_t pf_buffers[MAX_PREFETCH_BUFFERS];
+
+__attribute__((constructor)) static void init_buffers() {
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) { // Initialize write buffers
+        wr_buffers[i].fd = -1;
+        wr_buffers[i].buffer = NULL;
+        wr_buffers[i].buffer_pos = 0;
+    }
+
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) { // Initialize prefetch buffers
+        pf_buffers[i].fd = -1;
+        pf_buffers[i].buffer = NULL;
+        pf_buffers[i].buffer_pos = 0;
+        pf_buffers[i].data_size = 0;
+    }
+}
+
+/*
+Utility Functions
+*/
+
+// Write Buffer Management
+
+static wr_buffer_t* get_write_buffer(int fd) {
+    if (fd < 2) { // Don't buffer std out or err
+        return NULL; 
+    }
+
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
+        if (wr_buffers[i].fd == fd) {
+            return &wr_buffers[i];
+        }
+    }
+    return NULL;
+}
+
+
+static wr_buffer_t* allocate_write_buffer(int fd) {
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
+        if (wr_buffers[i].fd == -1) {
+            wr_buffers[i].buffer = malloc(WRITE_BUFFER_SIZE);
+            if (!wr_buffers[i].buffer) {
+                return NULL;
+            }
+            wr_buffers[i].fd = fd;
+            wr_buffers[i].buffer_pos = 0;
+            return &wr_buffers[i];
+        }
+    }
+    return NULL;
+}
+
+
+static void flush_write_buffer(wr_buffer_t *buf) {
+    static original_write_t original_write = NULL;
+    if (!original_write) {
+        original_write = dlsym(RTLD_NEXT, "write");
+    }
+
+    if (buf->buffer_pos > 0 && buf->fd >= 0) {
+        ssize_t bytes = original_write(buf->fd, buf->buffer, buf->buffer_pos);
+        fprintf(stderr, "Flushed %zu bytes to fd %d, wrote %zd bytes\n", buf->buffer_pos, buf->fd, bytes); // DEBUG
+        buf->buffer_pos = 0;
+    }
+}
+
+
+static void free_write_buffer(int fd) {
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
+        if (wr_buffers[i].fd == fd) {
+            flush_write_buffer(&wr_buffers[i]);
+            free(wr_buffers[i].buffer);
+            wr_buffers[i].buffer = NULL;
+            wr_buffers[i].fd = -1;
+            wr_buffers[i].buffer_pos = 0;
+            return;
+        }
+    }
+}
+
+// Prefetch Buffer Management
+
+static pf_buffer_t* get_prefetch_buffer(int fd) {
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
+        if (pf_buffers[i].fd == fd) {
+            return &pf_buffers[i];
+        }
+    }
+    return NULL;
+}
+
+
+static pf_buffer_t* allocate_prefetch_buffer(int fd) {
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
+        if (pf_buffers[i].fd == -1) {
+            pf_buffers[i].buffer = malloc(PREFETCH_BUFFER_SIZE);
+            if (!pf_buffers[i].buffer) {
+                return NULL;
+            }
+            pf_buffers[i].fd = fd;
+            pf_buffers[i].buffer_pos = 0;
+            pf_buffers[i].data_size = 0;
+            return &pf_buffers[i];
+        }
+    }
+    return NULL;
+}
+
+
+static void free_prefetch_buffer(int fd) {
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
+        if (pf_buffers[i].fd == fd) {
+            free(pf_buffers[i].buffer);
+            pf_buffers[i].buffer = NULL;
+            pf_buffers[i].fd = -1;
+            pf_buffers[i].buffer_pos = 0;
+            pf_buffers[i].data_size = 0;
+            return;
+        }
+    }
+}
+
+/*
+Intercepted Functions
+*/
+
+int open(const char *path, int flags, ...) {
+    static original_open_t original_open = NULL;
+    if (!original_open) original_open = dlsym(RTLD_NEXT, "open");
+
+    va_list args;
+    va_start(args, flags);
+    int fd;
+
+    if (flags & O_CREAT) {
+        mode_t mode = va_arg(args, mode_t);
+        fd = original_open(path, flags, mode);
+    } else {
+        fd = original_open(path, flags);
+    }
+
+    va_end(args);
+
+    if (fd > 2) {
+        int access_mode = flags & O_ACCMODE;
+        
+        if (access_mode == O_WRONLY || access_mode == O_RDWR) {
+            allocate_write_buffer(fd);
+        }
+
+        if (access_mode == O_RDONLY || access_mode == O_RDWR) {
+            allocate_prefetch_buffer(fd);
+        }
+    }
+
+    return fd;
+}
+
+
+ssize_t write(int fd, const void *buf, size_t count) {
+    static original_write_t original_write = NULL;
+    if (!original_write) original_write = dlsym(RTLD_NEXT, "write");
+
+    if (fd <= 2) { //checking this twice...
+        return original_write(fd, buf, count);
+    }
+
+    wr_buffer_t *wb = get_write_buffer(fd);
+    
+    if (!wb) {
+        ssize_t bytes = original_write(fd, buf, count);
+        return bytes;
+    }
+
+    if (wb->buffer_pos + count > WRITE_BUFFER_SIZE) {
+        flush_write_buffer(wb);
+
+        if (count > WRITE_BUFFER_SIZE) {
+            ssize_t bytes = original_write(fd, buf, count);
+            return bytes;
+        }
+    }
+    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
+    
+    memcpy(wb->buffer + wb->buffer_pos, buf, count);
+    wb->buffer_pos += count;
+    
+    return count;
+}
+
+
+ssize_t read(int fd, void *buf, size_t count) {
+    static original_read_t original_read = NULL;
+    if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
+
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+
+    if (!pb) {
+        ssize_t bytes = original_read(fd, buf, count);
+        printf("Read %zd bytes directly from fd %d\n", bytes, fd); // DEBUG
+        return bytes;
+    }
+
+    if (count <= pb->data_size - pb->buffer_pos) { // If requested data is in buffer
+        memcpy(buf, pb->buffer + pb->buffer_pos, count);
+        pb->buffer_pos += count;
+        return count;
+    }
+
+    char *out = buf;
+    size_t total_read = 0;
+    size_t needed = count;
+
+    if (pb->buffer_pos < pb->data_size) { // If some data is in buffer
+        size_t remaining = pb->data_size - pb->buffer_pos;
+        
+        memcpy(out, pb->buffer + pb->buffer_pos, remaining);
+
+        pb->buffer_pos += remaining;
+        total_read += remaining;
+        out += remaining;
+        needed -= remaining;
+    }
+
+    if (needed == 0) { // If no more data is needed
+        return total_read;
+    }
+
+    if (needed > PREFETCH_BUFFER_SIZE) {
+        ssize_t bytes = original_read(fd, out, needed);
+        printf("Read %zd bytes directly from fd %d\n", bytes, fd); // DEBUG
+
+        if (bytes <= 0) {
+            return total_read > 0 ? total_read : bytes; // Return what we have or the error
+        }
+
+        total_read += bytes;
+    } else {
+        ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
+        printf("Prefetched %zd bytes into buffer for fd %d\n", bytes, fd); // DEBUG
+    
+        if (bytes <= 0) {
+            return total_read > 0 ? total_read : bytes;
+        } else if (bytes < needed) {
+            needed = bytes; // Adjust needed if we read less than requested
+        }
+    
+        pb->data_size = bytes;
+        memcpy(out, pb->buffer, needed);
+        pb->buffer_pos = needed;
+        total_read += needed;
+    }
+
+    return total_read;
+}
+
+int close(int fd) {
+    static original_close_t original_close = NULL;
+    if (!original_close) original_close = dlsym(RTLD_NEXT, "close");
+
+    free_write_buffer(fd);
+    free_prefetch_buffer(fd);
+
+    int result = original_close(fd);
+
+    return result;
+}
