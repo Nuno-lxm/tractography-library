@@ -73,19 +73,6 @@ __attribute__((constructor)) static void init_buffers() {
 Utility Functions
 */
 
-static void flush_buffers(int fd) {
-    wr_buffer_t *wb = get_write_buffer(fd);
-    if (wb && wb->buffer_pos > 0) {
-        flush_write_buffer(wb);
-    }
-
-    pf_buffer_t *pb = get_prefetch_buffer(fd);
-    if (pb) {
-        pb->buffer_pos = 0;
-        pb->data_size = 0;
-    }
-}
-
 // Write Buffer Management
 
 static wr_buffer_t* get_write_buffer(int fd) {
@@ -176,6 +163,21 @@ static void free_prefetch_buffer(pf_buffer_t * pb) {
     return;
 }
 
+// General Buffer Management
+
+static void flush_buffers(int fd) {
+    wr_buffer_t *wb = get_write_buffer(fd);
+    if (wb && wb->buffer_pos > 0) {
+        flush_write_buffer(wb);
+    }
+
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        pb->buffer_pos = 0;
+        pb->data_size = 0;
+    }
+}
+
 /*
 Intercepted Functions
 */
@@ -228,7 +230,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
     static original_write_t original_write = NULL;
     if (!original_write) original_write = dlsym(RTLD_NEXT, "write");
 
-    if (fd <= 2) { //checking this twice...
+    if (fd < 2) { //checking this twice...
         return original_write(fd, buf, count);
     }
 
@@ -255,6 +257,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
     return count;
 }
 
+
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
     static original_pwrite_t original_pwrite = NULL;
     if (!original_pwrite) original_pwrite = dlsym(RTLD_NEXT, "pwrite");
@@ -265,7 +268,6 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
 }
 
 // Read operations
-
 
 ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
@@ -299,10 +301,6 @@ ssize_t read(int fd, void *buf, size_t count) {
         total_read += remaining;
         out += remaining;
         needed -= remaining;
-    }
-
-    if (needed == 0) { // If no more data is needed
-        return total_read;
     }
 
     if (needed > PREFETCH_BUFFER_SIZE) {
