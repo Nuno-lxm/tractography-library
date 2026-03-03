@@ -55,6 +55,8 @@ static pf_buffer_t pf_buffers[MAX_PREFETCH_BUFFERS];
 
 
 __attribute__((constructor)) static void init_buffers() {
+    printf("Intializing buffer library...\n");
+
     for (int i = 0; i < MAX_WRITE_BUFFERS; i++) { // Initialize write buffers
         wr_buffers[i].fd = -1;
         wr_buffers[i].buffer = NULL;
@@ -386,4 +388,6 @@ __attribute__((destructor)) static void cleanup_buffers() {
             pf_buffers[i].data_size = 0;
         }
     }
+
+    printf("Buffer library successfully unloaded\n");
 }

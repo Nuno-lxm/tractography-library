@@ -10,5 +10,6 @@ buffer_lib.so: buffer_lib.c | bin
 
 test: test.c | bin
 	gcc -Wall -o $(BIN_DIR)/test test.c
+	
 clean:
 	rm -rf $(BIN_DIR)
