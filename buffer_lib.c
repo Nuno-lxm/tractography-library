@@ -32,6 +32,7 @@ typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
 typedef int (*original_fsync_t)(int fd);
 typedef int (*original_fdatasync_t)(int fd);
+typedef pid_t (*original_fork_t)(void);
 
 /*
 Define Buffer Arrays
@@ -177,6 +178,28 @@ static void flush_buffers(int fd) {
     if (pb) {
         pb->buffer_pos = 0;
         pb->data_size = 0;
+    }
+}
+
+
+static void clear_all_buffers(void) { //Clear al buffers for child after fork
+    for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
+        if (wr_buffers[i].buffer) {
+            free(wr_buffers[i].buffer);
+        }
+        wr_buffers[i].buffer = NULL;
+        wr_buffers[i].fd = -1;
+        wr_buffers[i].buffer_pos = 0;
+    }
+
+    for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
+        if (pf_buffers[i].buffer) {
+            free(pf_buffers[i].buffer);
+        }
+        pf_buffers[i].buffer = NULL;
+        pf_buffers[i].fd = -1;
+        pf_buffers[i].buffer_pos = 0;
+        pf_buffers[i].data_size = 0;
     }
 }
 
@@ -364,6 +387,19 @@ int fdatasync(int fd) {
     return original_fdatasync(fd);
 }
 
+
+pid_t fork(void) {
+    static original_fork_t original_fork = NULL;
+    if (!original_fork) original_fork = dlsym(RTLD_NEXT, "fork");
+
+    pid_t pid = original_fork();
+
+    if (pid == 0) {
+        clear_all_buffers();
+    }
+
+    return pid;
+}
 
 /*
 Clean up
