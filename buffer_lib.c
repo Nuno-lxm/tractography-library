@@ -120,7 +120,6 @@ static void flush_write_buffer(wr_buffer_t *wb) {
 
 
 static void free_write_buffer(wr_buffer_t * wb) {
-    flush_write_buffer(wb);
     free(wb->buffer);
     wb->buffer = NULL;
     wb->fd = -1;
@@ -184,22 +183,11 @@ static void flush_buffers(int fd) {
 
 static void clear_all_buffers(void) { //Clear al buffers for child after fork
     for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
-        if (wr_buffers[i].buffer) {
-            free(wr_buffers[i].buffer);
-        }
-        wr_buffers[i].buffer = NULL;
-        wr_buffers[i].fd = -1;
-        wr_buffers[i].buffer_pos = 0;
+        free_write_buffer(&wr_buffers[i]);
     }
 
     for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
-        if (pf_buffers[i].buffer) {
-            free(pf_buffers[i].buffer);
-        }
-        pf_buffers[i].buffer = NULL;
-        pf_buffers[i].fd = -1;
-        pf_buffers[i].buffer_pos = 0;
-        pf_buffers[i].data_size = 0;
+        free_prefetch_buffer(&pf_buffers[i]);   
     }
 }
 
@@ -236,6 +224,7 @@ int close(int fd) {
 
     wr_buffer_t *wb = get_write_buffer(fd);
     if (wb) {
+        flush_write_buffer(wb);
         free_write_buffer(wb);
     }
 
@@ -390,7 +379,7 @@ int fdatasync(int fd) {
 
 pid_t fork(void) {
     static original_fork_t original_fork = NULL;
-    if (!original_fork) original_fork = dlsym(RTLD_NEXT, "fork");
+    if (!original_fork) original_fork = (original_fork_t)dlsym(RTLD_NEXT, "fork");
 
     pid_t pid = original_fork();
 
@@ -409,19 +398,12 @@ __attribute__((destructor)) static void cleanup_buffers() {
     for (int i = 0; i < MAX_WRITE_BUFFERS; i++) {
         if (wr_buffers[i].buffer) {
             flush_write_buffer(&wr_buffers[i]);
-            free(wr_buffers[i].buffer);
-            wr_buffers[i].buffer = NULL;
-            wr_buffers[i].fd = -1;
-            wr_buffers[i].buffer_pos = 0;
+            free_write_buffer(&wr_buffers[i]);
         }
     }
     for (int i = 0; i < MAX_PREFETCH_BUFFERS; i++) {
         if (pf_buffers[i].buffer) {
-            free(pf_buffers[i].buffer);
-            pf_buffers[i].buffer = NULL;
-            pf_buffers[i].fd = -1;
-            pf_buffers[i].buffer_pos = 0;
-            pf_buffers[i].data_size = 0;
+            free_prefetch_buffer(&pf_buffers[i]);
         }
     }
 
