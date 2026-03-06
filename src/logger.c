@@ -17,6 +17,8 @@ typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
+typedef int (*original_openat_t)(int dirfd, const char *path, int flags, ...);
+typedef ssize_t (*original_pread64_t)(int fd, void *buf, size_t count, off_t offset);
 
 static __thread int in_log = 0;
 
@@ -127,4 +129,35 @@ off_t lseek(int fd, off_t offset, int whence) {
             getpid(), fd, (long)offset, whence_str, (long)result);
 
     return result;
+}
+
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    static original_openat_t original_openat = NULL;
+    if (!original_openat) original_openat = (original_openat_t)dlsym(RTLD_NEXT, "openat");
+
+    va_list args;
+    va_start(args, flags);
+    int fd;
+
+    if (flags & O_CREAT) {
+        mode_t mode = va_arg(args, mode_t);
+        fd = original_openat(dirfd, path, flags, mode);
+    } else {
+        fd = original_openat(dirfd, path, flags);
+    }
+    va_end(args);
+
+    log_msg("[pid=%d] openat(dirfd=%d, path='%s', flags=0x%x) = %d\n", getpid(), dirfd, path, flags, fd);
+    return fd;
+}
+
+
+ssize_t pread64(int fd, void *buf, size_t count, off_t offset) {
+    static original_pread64_t original_pread64 = NULL;
+    if (!original_pread64) original_pread64 = (original_pread64_t)dlsym(RTLD_NEXT, "pread64");
+
+    ssize_t bytes = original_pread64(fd, buf, count, offset);
+    log_msg("[pid=%d] pread64(fd=%d, count=%zu, offset=%ld) = %zd\n", getpid(), fd, count, (long)offset, bytes);
+    return bytes;
 }
