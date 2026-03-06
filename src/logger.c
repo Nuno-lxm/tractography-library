@@ -16,6 +16,7 @@ typedef int (*original_open_t)(const char *path, int flags, ...);
 typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
+typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
 
 static __thread int in_log = 0;
 
@@ -108,5 +109,22 @@ int close(int fd) {
 
     int result = original_close(fd);
     log_msg("[pid=%d] close(fd=%d) = %d\n", getpid(), fd, result);
+    return result;
+}
+
+
+off_t lseek(int fd, off_t offset, int whence) {
+    static original_lseek_t original_lseek = NULL;
+    if (!original_lseek) original_lseek = (original_lseek_t)dlsym(RTLD_NEXT, "lseek");
+
+    off_t result = original_lseek(fd, offset, whence);
+
+    const char *whence_str = (whence == SEEK_SET) ? "SEEK_SET" :
+                             (whence == SEEK_CUR) ? "SEEK_CUR" :
+                             (whence == SEEK_END) ? "SEEK_END" : "UNKNOWN";
+
+    log_msg("[pid=%d] lseek(fd=%d, offset=%ld, whence=%s) = %ld\n",
+            getpid(), fd, (long)offset, whence_str, (long)result);
+
     return result;
 }
