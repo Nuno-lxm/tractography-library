@@ -8,6 +8,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #define LOG_FILE "logger.log"
 
@@ -19,6 +20,9 @@ typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
 typedef int (*original_openat_t)(int dirfd, const char *path, int flags, ...);
 typedef ssize_t (*original_pread64_t)(int fd, void *buf, size_t count, off_t offset);
+typedef int (*original_stat_t)(const char *path, struct stat *buf);
+typedef int (*original_fstat_t)(int fd, struct stat *buf);
+typedef pid_t (*original_fork_t)(void);
 
 static __thread int in_log = 0;
 
@@ -160,4 +164,34 @@ ssize_t pread64(int fd, void *buf, size_t count, off_t offset) {
     ssize_t bytes = original_pread64(fd, buf, count, offset);
     log_msg("[pid=%d] pread64(fd=%d, count=%zu, offset=%ld) = %zd\n", getpid(), fd, count, (long)offset, bytes);
     return bytes;
+}
+
+
+int stat(const char *path, struct stat *buf) {
+    static original_stat_t original_stat = NULL;
+    if (!original_stat) original_stat = (original_stat_t)dlsym(RTLD_NEXT, "stat");
+
+    int result = original_stat(path, buf);
+    log_msg("[pid=%d] stat(path='%s') = %d\n", getpid(), path, result);
+    return result;
+}
+
+
+int fstat(int fd, struct stat *buf) {
+    static original_fstat_t original_fstat = NULL;
+    if (!original_fstat) original_fstat = (original_fstat_t)dlsym(RTLD_NEXT, "fstat");
+
+    int result = original_fstat(fd, buf);
+    log_msg("[pid=%d] fstat(fd=%d) = %d\n", getpid(), fd, result);
+    return result;
+}
+
+
+pid_t fork(void) {
+    static original_fork_t original_fork = NULL;
+    if (!original_fork) original_fork = (original_fork_t)dlsym(RTLD_NEXT, "fork");
+
+    pid_t pid = original_fork();
+    log_msg("[pid=%d] fork() = %d\n", getpid(), pid);
+    return pid;
 }
