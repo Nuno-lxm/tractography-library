@@ -54,6 +54,23 @@ typedef struct { // Prefetch Buffers
 static wr_buffer_t wr_buffers[MAX_WRITE_BUFFERS];
 static pf_buffer_t pf_buffers[MAX_PREFETCH_BUFFERS];
 
+/*
+Statistics Variables
+*/
+
+// Write Stats
+static unsigned long intercept_writes = 0;
+static unsigned long syscall_writes = 0;
+
+static size_t intercept_wr_bytes = 0;
+static size_t syscall_wr_bytes = 0;
+
+//Read Stats
+static unsigned long intercept_reads = 0;
+static unsigned long syscall_reads = 0;
+
+static size_t intercept_rd_bytes = 0;
+static size_t syscall_rd_bytes = 0;
 
 __attribute__((constructor)) static void init_buffers() {
     printf("Intializing buffer library...\n");
@@ -75,6 +92,28 @@ __attribute__((constructor)) static void init_buffers() {
 /*
 Utility Functions
 */
+
+// Statistics Functions
+
+static inline void update_intercept_writes(size_t count) {
+    intercept_writes++;
+    intercept_wr_bytes += count;
+}
+
+static inline void update_syscall_writes(size_t count) {
+    syscall_writes++;
+    syscall_wr_bytes += count;
+}
+
+static inline void update_intercept_reads(size_t count) {
+    intercept_reads++;
+    intercept_rd_bytes += count;
+}
+
+static inline void update_syscall_reads(size_t count) {
+    syscall_reads++;
+    syscall_rd_bytes += count;
+}
 
 // Write Buffer Management
 
@@ -114,6 +153,7 @@ static void flush_write_buffer(wr_buffer_t *wb) {
 
     if (wb->buffer_pos > 0 && wb->fd >= 0) {
         original_write(wb->fd, wb->buffer, wb->buffer_pos); // Possibly add error handling
+        update_syscall_writes(wb->buffer_pos);
         wb->buffer_pos = 0;
     }
 }
@@ -248,11 +288,14 @@ ssize_t write(int fd, const void *buf, size_t count) {
         return original_write(fd, buf, count);
     }
 
+    update_intercept_writes(count);
+
     wr_buffer_t *wb = get_write_buffer(fd);
 
     if (!wb) {
         wb = allocate_write_buffer(fd);
         if (!wb) {
+            update_syscall_writes(count);
             return original_write(fd, buf, count);
         }
     }
@@ -261,6 +304,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
         flush_write_buffer(wb);
 
         if (count > WRITE_BUFFER_SIZE) {
+            update_syscall_writes(count);
             return original_write(fd, buf, count);
         }
     }
@@ -287,11 +331,14 @@ ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
+    update_intercept_reads(count);
+
     pf_buffer_t *pb = get_prefetch_buffer(fd);
 
     if (!pb) {
         pb = allocate_prefetch_buffer(fd);
         if (!pb) {
+            update_syscall_reads(count);
             return original_read(fd, buf, count);
         }
     }
@@ -318,6 +365,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 
     if (needed > PREFETCH_BUFFER_SIZE) {
+        update_syscall_reads(needed);
         ssize_t bytes = original_read(fd, out, needed);
 
         if (bytes <= 0) {
@@ -326,6 +374,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 
         total_read += bytes;
     } else {
+        update_syscall_reads(PREFETCH_BUFFER_SIZE);
         ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
     
         if (bytes <= 0) {
@@ -406,6 +455,30 @@ __attribute__((destructor)) static void cleanup_buffers() {
             free_prefetch_buffer(&pf_buffers[i]);
         }
     }
+
+    double intercept_wr_avg = intercept_writes
+        ? (double)intercept_wr_bytes / (double)intercept_writes
+        : 0.0;
+
+    double syscall_wr_avg = syscall_writes
+        ? (double)syscall_wr_bytes / (double)syscall_writes
+        : 0.0;
+
+    double intercept_rd_avg = intercept_reads
+        ? (double)intercept_rd_bytes / (double)intercept_reads
+        : 0.0;
+
+    double syscall_rd_avg = syscall_reads
+        ? (double)syscall_rd_bytes / (double)syscall_reads
+        : 0.0;
+
+    fprintf(stderr, "\n%-12s %12s %12s %16s\n", "", "writes", "bytes", "avg_bytes/write");
+    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "intercepted", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
+    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "executed", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+
+    fprintf(stderr, "\n%-12s %12s %12s %16s\n", "", "reads", "bytes", "avg_bytes/read");
+    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "intercepted", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
+    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "executed", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
 
     printf("Buffer library successfully unloaded\n");
 }
