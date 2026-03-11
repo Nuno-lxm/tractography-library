@@ -258,18 +258,11 @@ static void flush_buffers(int fd) {
 }
 
 
-static void clear_all_buffers(void) { //Clear al buffers for child after fork
+static void clear_write_buffers(void) { //Clear all write buffers for child after fork
     for (int i = 0; i < wr_buffer_cap; i++) {
         wr_buffer_t *wb = get_write_buffer(i);
         if (wb) {
             free_write_buffer(wb);
-        }
-    }
-
-    for (int i = 0; i < pf_buffer_cap; i++) {
-        pf_buffer_t *pb = get_prefetch_buffer(i);
-        if (pb) {
-            free_prefetch_buffer(pb);
         }
     }
 }
@@ -476,7 +469,7 @@ pid_t fork(void) {
     pid_t pid = original_fork();
 
     if (pid == 0) {
-        clear_all_buffers();
+        clear_write_buffers();
     }
 
     return pid;
