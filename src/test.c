@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #define TESTDIR "test/"
 
@@ -183,6 +184,65 @@ int main(void) {
     close(fd1);
     bytes = write(fd1, "X", 1);
     printf("write() after close returned: %zd (errno=%d: %s)\n", bytes, errno, strerror(errno));
+
+    #include <sys/wait.h>   // add this include at the top (for waitpid)
+
+    // Test 12: fork() behavior (child should not flush/duplicate parent's buffers)
+    printf("\n=== Test 12: fork() child clears buffers ===\n");
+
+    fd1 = open(TESTDIR "forktest.txt", O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    if (fd1 < 0) {
+        perror("open forktest.txt");
+        return 1;
+    }
+
+    // Buffered write in parent (do not close yet)
+    if (write(fd1, "PARENT", 6) != 6) {
+        perror("write PARENT");
+        close(fd1);
+        return 1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        close(fd1);
+        return 1;
+    }
+
+    if (pid == 0) {
+        // Child: exit immediately. Your LD_PRELOAD lib's destructor will run here.
+        // If buffers were not cleared in the child, it could flush "PARENT" again.
+        _exit(0);
+    }
+
+    // Parent waits for child, then closes (flush happens exactly once here)
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        perror("waitpid");
+        close(fd1);
+        return 1;
+    }
+
+    close(fd1);
+
+    // Verify file contents
+    fd1 = open(TESTDIR "forktest.txt", O_RDONLY);
+    if (fd1 < 0) {
+        perror("open forktest.txt (readback)");
+        return 1;
+    }
+
+    bytes = read(fd1, buffer, sizeof(buffer) - 1);
+    if (bytes < 0) {
+        perror("read forktest.txt");
+        close(fd1);
+        return 1;
+    }
+
+    buffer[bytes] = '\0';
+    printf("forktest.txt: %s (expected: PARENT)\n", buffer);
+    close(fd1);
 
     return 0;
 }
