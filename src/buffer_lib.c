@@ -77,7 +77,7 @@ static size_t syscall_rd_bytes = 0;
 
 
 __attribute__((constructor)) static void init_buffers() {
-    printf("Intializing buffer library...\n");
+    fprintf(stderr, "Initializing buffer library...\n");
 
     wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
     wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
@@ -525,5 +525,5 @@ __attribute__((destructor)) static void cleanup_buffers() {
     fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "intercepted", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
     fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "executed", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
 
-    printf("Buffer library successfully unloaded\n");
+    fprintf(stderr, "Buffer library successfully unloaded\n");
 }
