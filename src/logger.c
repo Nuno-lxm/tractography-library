@@ -10,7 +10,7 @@
 #include <time.h>
 #include <sys/stat.h>
 
-#define LOG_FILE "logger.log"
+#define LOG_FILE "/mnt/logger.log"
 
 // Function Pointer Types for Original System Calls
 typedef int (*original_open_t)(const char *path, int flags, ...);
