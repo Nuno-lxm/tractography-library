@@ -23,6 +23,8 @@ typedef ssize_t (*original_pread64_t)(int fd, void *buf, size_t count, off_t off
 typedef int (*original_stat_t)(const char *path, struct stat *buf);
 typedef int (*original_fstat_t)(int fd, struct stat *buf);
 typedef pid_t (*original_fork_t)(void);
+typedef int (*original_dup_t)(int fd);
+typedef int (*original_dup2_t)(int oldfd, int newfd);
 
 static __thread int in_log = 0;
 
@@ -194,4 +196,24 @@ pid_t fork(void) {
     pid_t pid = original_fork();
     log_msg("[pid=%d] fork() = %d\n", getpid(), pid);
     return pid;
+}
+
+
+int dup(int fd) {
+    static original_dup_t original_dup = NULL;
+    if (!original_dup) original_dup = (original_dup_t)dlsym(RTLD_NEXT, "dup");
+
+    int newfd = original_dup(fd);
+    log_msg("[pid=%d] dup(fd=%d) = %d\n", getpid(), fd, newfd);
+    return newfd;
+}
+
+
+int dup2(int oldfd, int newfd) {
+    static original_dup2_t original_dup2 = NULL;
+    if (!original_dup2) original_dup2 = (original_dup2_t)dlsym(RTLD_NEXT, "dup2");
+
+    int result = original_dup2(oldfd, newfd);
+    log_msg("[pid=%d] dup2(oldfd=%d, newfd=%d) = %d\n", getpid(), oldfd, newfd, result);
+    return result;
 }
