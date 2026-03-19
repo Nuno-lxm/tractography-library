@@ -83,19 +83,19 @@ static void log_msg(const char *fmt, ...);
 
 
 __attribute__((constructor)) static void init_buffers() {
-    log_msg("Initializing buffer library...");
+    log_msg("Initializing buffer library...\n");
 
     wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
     wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
     if (!wr_buffers) {
-        log_msg("Failed to allocate write buffer array");
+        log_msg("Failed to allocate write buffer array\n");
         wr_buffer_cap = 0;
     }
 
     pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
     pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
     if (!pf_buffers) {
-        log_msg("Failed to allocate prefetch buffer array");
+        log_msg("Failed to allocate prefetch buffer array\n");
         pf_buffer_cap = 0;
     }
 }
@@ -119,35 +119,31 @@ static void log_msg(const char *fmt, ...) {
         }
     }
 
-    char msg[512];
-    char timestamp[64];
-    char logbuf[704];
+    char line[768];
+    size_t pos = 0;
 
     time_t now = time(NULL);
     struct tm tm_info;
-    localtime_r(&now, &tm_info);
-    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S] ", &tm_info);
+    if (localtime_r(&now, &tm_info)) {
+        size_t ts_len = strftime(line, sizeof(line), "[%Y-%m-%d %H:%M:%S] ", &tm_info);
+        pos = ts_len < sizeof(line) ? ts_len : sizeof(line) - 1;
+    }
+
+    int header_len = snprintf(line + pos, sizeof(line) - pos, "[pid=%ld] ", (long)getpid());
+    if (header_len > 0) {
+        size_t add = (size_t)header_len;
+        if (add > sizeof(line) - pos - 1) add = sizeof(line) - pos - 1;
+        pos += add;
+    }
 
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(msg, sizeof(msg), fmt, ap);
+    int n = vsnprintf(line + pos, sizeof(line) - pos, fmt, ap);
     va_end(ap);
 
     if (n > 0) {
-        int needs_newline = (n > 0 && msg[n - 1] != '\n');
-        int total = snprintf(
-            logbuf,
-            sizeof(logbuf),
-            "%s[pid=%ld] %s%s",
-            timestamp,
-            (long)getpid(),
-            msg,
-            needs_newline ? "\n" : ""
-        );
-        if (total > 0) {
-            size_t len = (size_t)total < sizeof(logbuf) ? (size_t)total : sizeof(logbuf) - 1;
-            syscall(SYS_write, log_fd, logbuf, len);
-        }
+        size_t len = strlen(line);
+        if (len > 0) syscall(SYS_write, log_fd, line, len);
     }
 
     in_log = 0;
@@ -577,11 +573,11 @@ __attribute__((destructor)) static void cleanup_buffers() {
         ? (double)syscall_rd_bytes / (double)syscall_reads
         : 0.0;
 
-    log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
-    log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
-    log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
-    log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
-    log_msg("Buffer library successfully unloaded");
+    log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
+    log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+    log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
+    log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
+    log_msg("Buffer library successfully unloaded\n");
 
     if (log_fd >= 0) {
         syscall(SYS_close, log_fd);
