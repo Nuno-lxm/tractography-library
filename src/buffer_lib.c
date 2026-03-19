@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <time.h>
 
 /*
 Configuration
@@ -19,6 +21,8 @@ Configuration
 
 #define PREFETCH_BUFFER_SIZE (64 * 1024) // 64KB
 #define INITIAL_PREFETCH_BUFFER_COUNT 64
+
+#define LOG_FILE "/mnt/buffer.log"
 
 /*
 Function Pointer Types for Original System Calls
@@ -75,21 +79,23 @@ static unsigned long syscall_reads = 0;
 static size_t intercept_rd_bytes = 0;
 static size_t syscall_rd_bytes = 0;
 
+static void log_msg(const char *fmt, ...);
+
 
 __attribute__((constructor)) static void init_buffers() {
-    fprintf(stderr, "Initializing buffer library...\n");
+    log_msg("Initializing buffer library...");
 
     wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
     wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
     if (!wr_buffers) {
-        fprintf(stderr, "Failed to allocate write buffer array\n");
+        log_msg("Failed to allocate write buffer array");
         wr_buffer_cap = 0;
     }
 
     pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
     pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
     if (!pf_buffers) {
-        fprintf(stderr, "Failed to allocate prefetch buffer array\n");
+        log_msg("Failed to allocate prefetch buffer array");
         pf_buffer_cap = 0;
     }
 }
@@ -97,6 +103,55 @@ __attribute__((constructor)) static void init_buffers() {
 /*
 Utility Functions
 */
+
+static __thread int in_log = 0;
+static int log_fd = -1;
+
+static void log_msg(const char *fmt, ...) {
+    if (in_log) return;
+    in_log = 1;
+
+    if (log_fd == -1) {
+        log_fd = syscall(SYS_open, LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd < 0) {
+            in_log = 0;
+            return;
+        }
+    }
+
+    char msg[512];
+    char timestamp[64];
+    char logbuf[704];
+
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S] ", &tm_info);
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    if (n > 0) {
+        int needs_newline = (n > 0 && msg[n - 1] != '\n');
+        int total = snprintf(
+            logbuf,
+            sizeof(logbuf),
+            "%s[pid=%ld] %s%s",
+            timestamp,
+            (long)getpid(),
+            msg,
+            needs_newline ? "\n" : ""
+        );
+        if (total > 0) {
+            size_t len = (size_t)total < sizeof(logbuf) ? (size_t)total : sizeof(logbuf) - 1;
+            syscall(SYS_write, log_fd, logbuf, len);
+        }
+    }
+
+    in_log = 0;
+}
 
 // Statistics Functions
 
@@ -367,21 +422,22 @@ ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
-    update_intercept_reads(count);
-
     pf_buffer_t *pb = get_prefetch_buffer(fd);
 
     if (!pb) {
         pb = allocate_prefetch_buffer(fd);
         if (!pb) {
-            update_syscall_reads(count);
-            return original_read(fd, buf, count);
+            ssize_t bytes = original_read(fd, buf, count);
+            update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
+            update_intercept_reads(bytes > 0 ? (size_t)bytes : 0);
+            return bytes;
         }
     }
 
     if (count <= pb->data_size - pb->buffer_pos) { // If requested data is in buffer
         memcpy(buf, pb->buffer + pb->buffer_pos, count);
         pb->buffer_pos += count;
+        update_intercept_reads(count);
         return count;
     }
 
@@ -401,19 +457,21 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 
     if (needed > PREFETCH_BUFFER_SIZE) {
-        update_syscall_reads(needed);
         ssize_t bytes = original_read(fd, out, needed);
+        update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
 
         if (bytes <= 0) {
+            update_intercept_reads(total_read);
             return total_read > 0 ? total_read : bytes; // Return what we have or the error
         }
 
         total_read += bytes;
     } else {
-        update_syscall_reads(PREFETCH_BUFFER_SIZE);
         ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
+        update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
     
         if (bytes <= 0) {
+            update_intercept_reads(total_read);
             return total_read > 0 ? total_read : bytes;
         } else if (bytes < needed) {
             needed = bytes; // Adjust needed if we read less than requested
@@ -424,6 +482,8 @@ ssize_t read(int fd, void *buf, size_t count) {
         pb->buffer_pos = needed;
         total_read += needed;
     }
+
+    update_intercept_reads(total_read);
 
     return total_read;
 }
@@ -517,13 +577,14 @@ __attribute__((destructor)) static void cleanup_buffers() {
         ? (double)syscall_rd_bytes / (double)syscall_reads
         : 0.0;
 
-    fprintf(stderr, "\n%-12s %12s %12s %16s\n", "", "writes", "bytes", "avg_bytes/write");
-    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "intercepted", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
-    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "executed", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+    log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
+    log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+    log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
+    log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
+    log_msg("Buffer library successfully unloaded");
 
-    fprintf(stderr, "\n%-12s %12s %12s %16s\n", "", "reads", "bytes", "avg_bytes/read");
-    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "intercepted", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
-    fprintf(stderr, "%-12s %12lu %12zu %16.2f\n", "executed", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
-
-    fprintf(stderr, "Buffer library successfully unloaded\n");
+    if (log_fd >= 0) {
+        syscall(SYS_close, log_fd);
+        log_fd = -1;
+    }
 }
