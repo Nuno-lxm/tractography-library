@@ -80,11 +80,16 @@ static unsigned long syscall_reads = 0;
 static size_t intercept_rd_bytes = 0;
 static size_t syscall_rd_bytes = 0;
 
-static void log_msg(const char *fmt, ...);
+/*
+Forward Declarations
+*/
 
+static void log_msg(const char *fmt, ...);
+static void log_cmdline();
 
 __attribute__((constructor)) static void init_buffers() {
     log_msg("Initializing buffer library...\n");
+    log_cmdline();
 
     wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
     wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
@@ -150,6 +155,36 @@ static void log_msg(const char *fmt, ...) {
     }
 
     in_log = 0;
+}
+
+
+static void log_cmdline() {
+    char path[64];
+
+    pid_t pid = getpid();
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    
+    int fd = syscall(SYS_open, path, O_RDONLY);
+    
+    if (fd < 0) {
+        log_msg("Failed to open cmdline for logging\n");
+        return;
+    }
+
+    char cmdline[512];
+    ssize_t bytes = syscall(SYS_read, fd, cmdline, sizeof(cmdline) - 1);
+    
+    if (bytes > 0) {
+        cmdline[bytes] = '\0';
+        for (ssize_t i = 0; i < bytes; i++) {
+            if (cmdline[i] == '\0') {
+                cmdline[i] = ' ';
+            }
+        }
+        log_msg("Command line: %s\n", cmdline);
+    }
+
+    syscall(SYS_close, fd);
 }
 
 // Statistics Functions
