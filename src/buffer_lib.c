@@ -119,31 +119,33 @@ static void log_msg(const char *fmt, ...) {
         }
     }
 
-    char line[768];
-    size_t pos = 0;
+    char msg[512];
+    char timestamp[64];
+    char logbuf[704];
 
     time_t now = time(NULL);
     struct tm tm_info;
-    if (localtime_r(&now, &tm_info)) {
-        size_t ts_len = strftime(line, sizeof(line), "[%Y-%m-%d %H:%M:%S] ", &tm_info);
-        pos = ts_len < sizeof(line) ? ts_len : sizeof(line) - 1;
-    }
-
-    int header_len = snprintf(line + pos, sizeof(line) - pos, "[pid=%ld] ", (long)getpid());
-    if (header_len > 0) {
-        size_t add = (size_t)header_len;
-        if (add > sizeof(line) - pos - 1) add = sizeof(line) - pos - 1;
-        pos += add;
-    }
+    localtime_r(&now, &tm_info);
+    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S] ", &tm_info);
 
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(line + pos, sizeof(line) - pos, fmt, ap);
+    int n = vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
     if (n > 0) {
-        size_t len = strlen(line);
-        if (len > 0) syscall(SYS_write, log_fd, line, len);
+        int total = snprintf(
+            logbuf,
+            sizeof(logbuf),
+            "%s[pid=%ld] %s",
+            timestamp,
+            (long)getpid(),
+            msg
+        );
+        if (total > 0) {
+            size_t len = (size_t)total < sizeof(logbuf) ? (size_t)total : sizeof(logbuf) - 1;
+            syscall(SYS_write, log_fd, logbuf, len);
+        }
     }
 
     in_log = 0;
@@ -314,6 +316,15 @@ static void clear_write_buffers(void) { //Clear all write buffers for child afte
         wr_buffer_t *wb = get_write_buffer(i);
         if (wb) {
             free_write_buffer(wb);
+        }
+    }
+}
+
+static void clear_prefetch_buffers(void) { // Clear all prefetch buffers for child after fork
+    for (int i = 0; i < pf_buffer_cap; i++) {
+        pf_buffer_t *pb = get_prefetch_buffer(i);
+        if (pb) {
+            free_prefetch_buffer(pb);
         }
     }
 }
@@ -526,6 +537,7 @@ pid_t fork(void) {
 
     if (pid == 0) {
         clear_write_buffers();
+        clear_prefetch_buffers();
     }
 
     return pid;
