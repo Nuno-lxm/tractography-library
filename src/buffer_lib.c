@@ -26,6 +26,13 @@ Configuration
 #define LOG_FILE "/mnt/buffer.log"
 
 /*
+Policy Flags - Set to 0 to disable, 1 to enable
+*/
+
+#define ENABLE_WRITE_BUFFERING 0
+#define ENABLE_READ_PREFETCH 0
+
+/*
 Function Pointer Types for Original System Calls
 */
 
@@ -91,18 +98,28 @@ __attribute__((constructor)) static void init_buffers() {
     log_msg("Initializing buffer library...\n");
     log_cmdline();
 
-    wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
-    wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
-    if (!wr_buffers) {
-        log_msg("Failed to allocate write buffer array\n");
+    if (ENABLE_WRITE_BUFFERING) {
+        wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
+        wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
+        if (!wr_buffers) {
+            log_msg("Failed to allocate write buffer array\n");
+            wr_buffer_cap = 0;
+        }
+    } else {
         wr_buffer_cap = 0;
+        wr_buffers = NULL;
     }
 
-    pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
-    pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
-    if (!pf_buffers) {
-        log_msg("Failed to allocate prefetch buffer array\n");
+    if (ENABLE_READ_PREFETCH) {
+        pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
+        pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
+        if (!pf_buffers) {
+            log_msg("Failed to allocate prefetch buffer array\n");
+            pf_buffer_cap = 0;
+        }
+    } else {
         pf_buffer_cap = 0;
+        pf_buffers = NULL;
     }
 }
 
@@ -446,6 +463,10 @@ ssize_t write(int fd, const void *buf, size_t count) {
         return original_write(fd, buf, count);
     }
 
+    if (!ENABLE_WRITE_BUFFERING) {
+        return original_write(fd, buf, count);
+    }
+
     update_intercept_writes(count);
 
     wr_buffer_t *wb = get_write_buffer(fd);
@@ -491,6 +512,13 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
 ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
+
+    if (!ENABLE_READ_PREFETCH) {
+        ssize_t bytes = original_read(fd, buf, count);
+        update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
+        update_intercept_reads(bytes > 0 ? (size_t)bytes : 0);
+        return bytes;
+    }
 
     pf_buffer_t *pb = get_prefetch_buffer(fd);
 
@@ -648,6 +676,7 @@ __attribute__((destructor)) static void cleanup_buffers() {
         ? (double)syscall_rd_bytes / (double)syscall_reads
         : 0.0;
 
+    log_cmdline();
     log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
     log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
     log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
