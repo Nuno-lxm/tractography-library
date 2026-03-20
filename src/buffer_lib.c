@@ -97,13 +97,15 @@ static int buffering_target = 0;
 static int prefetching_target = 0;
 
 __attribute__((constructor)) static void init_buffers() {
-    log_msg("Initializing buffer library...\n");
-    if (get_cmdline(cmdline, sizeof(cmdline)) == 0) {
-        log_msg("%s\n", cmdline);
-    }
+    get_cmdline(cmdline, sizeof(cmdline));
     
     if (ENABLE_WRITE_BUFFERING && is_buffering_target()) buffering_target = 1;
     if (ENABLE_READ_PREFETCH && is_prefetching_target()) prefetching_target = 1;
+
+    if (!buffering_target && !prefetching_target) return;
+
+    log_msg("Initializing buffer library...\n");
+    log_msg("%s\n", cmdline);
 
     if (buffering_target) {
         wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
@@ -655,8 +657,6 @@ Clean up
 */
 
 __attribute__((destructor)) static void cleanup_buffers() {
-    log_msg("%s\n", cmdline);
-
     if (buffering_target) {
         for (int i = 0; i < wr_buffer_cap; i++) {
             if (wr_buffers[i]) {
@@ -704,8 +704,6 @@ __attribute__((destructor)) static void cleanup_buffers() {
         log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
     }
     
-    log_msg("Buffer library successfully unloaded\n");
-
     if (log_fd >= 0) {
         syscall(SYS_close, log_fd);
         log_fd = -1;
