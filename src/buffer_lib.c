@@ -17,6 +17,9 @@
 Configuration
 */
 
+#define ENABLE_WRITE_BUFFERING 1
+#define ENABLE_READ_PREFETCH 1
+
 #define WRITE_BUFFER_SIZE (64 * 1024) // 64KB
 #define INITIAL_WRITE_BUFFER_COUNT 64
 
@@ -24,13 +27,6 @@ Configuration
 #define INITIAL_PREFETCH_BUFFER_COUNT 64
 
 #define LOG_FILE "/mnt/buffer.log"
-
-/*
-Policy Flags - Set to 0 to disable, 1 to enable
-*/
-
-#define ENABLE_WRITE_BUFFERING 0
-#define ENABLE_READ_PREFETCH 0
 
 /*
 Function Pointer Types for Original System Calls
@@ -92,11 +88,15 @@ Forward Declarations
 */
 
 static void log_msg(const char *fmt, ...);
-static void log_cmdline();
+static int get_cmdline(char* out);
+
+char cmdline[512];
 
 __attribute__((constructor)) static void init_buffers() {
     log_msg("Initializing buffer library...\n");
-    log_cmdline();
+    if (get_cmdline(cmdline) == 0) {
+        log_msg("%s", cmdline);
+    }
 
     if (ENABLE_WRITE_BUFFERING) {
         wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
@@ -174,34 +174,30 @@ static void log_msg(const char *fmt, ...) {
     in_log = 0;
 }
 
+static int get_cmdline(char* out) {
+    size_t out_size = sizeof(out);
+    if (!out || out_size < 2) return -1;
 
-static void log_cmdline() {
     char path[64];
-
     pid_t pid = getpid();
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-    
-    int fd = syscall(SYS_open, path, O_RDONLY);
-    
-    if (fd < 0) {
-        log_msg("Failed to open cmdline for logging\n");
-        return;
-    }
 
-    char cmdline[512];
-    ssize_t bytes = syscall(SYS_read, fd, cmdline, sizeof(cmdline) - 1);
-    
+    int fd = syscall(SYS_open, path, O_RDONLY);
+
+    if (fd < 0) return -1;
+
+    ssize_t bytes = syscall(SYS_read, fd, out, sizeof(out) - 1);
+    syscall(SYS_close, fd);
+
     if (bytes > 0) {
-        cmdline[bytes] = '\0';
+        out[bytes] = '\0';
         for (ssize_t i = 0; i < bytes; i++) {
-            if (cmdline[i] == '\0') {
-                cmdline[i] = ' ';
+            if (out[i] == '\0') {
+                out[i] = ' ';
             }
         }
-        log_msg("Command line: %s\n", cmdline);
     }
-
-    syscall(SYS_close, fd);
+    return 0;
 }
 
 // Statistics Functions
@@ -308,7 +304,6 @@ static void free_write_buffer(wr_buffer_t *wb) {
 }
 
 // Prefetch Buffer Management
-
 
 static int ensure_pf_cap(int fd) {
     if (fd < 0) return 0;
@@ -676,7 +671,7 @@ __attribute__((destructor)) static void cleanup_buffers() {
         ? (double)syscall_rd_bytes / (double)syscall_reads
         : 0.0;
 
-    log_cmdline();
+    log_msg("%s", cmdline);
     log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
     log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
     log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
