@@ -88,17 +88,24 @@ Forward Declarations
 */
 
 static void log_msg(const char *fmt, ...);
-static int get_cmdline(char* out);
+static int get_cmdline(char *out, size_t out_size);
+static int is_buffering_target();
+static int is_prefetching_target();
 
-char cmdline[512];
+static char cmdline[512];
+static int buffering_target = 0;
+static int prefetching_target = 0;
 
 __attribute__((constructor)) static void init_buffers() {
     log_msg("Initializing buffer library...\n");
-    if (get_cmdline(cmdline) == 0) {
-        log_msg("%s", cmdline);
+    if (get_cmdline(cmdline, sizeof(cmdline)) == 0) {
+        log_msg("%s\n", cmdline);
     }
+    
+    if (ENABLE_WRITE_BUFFERING && is_buffering_target()) buffering_target = 1;
+    if (ENABLE_READ_PREFETCH && is_prefetching_target()) prefetching_target = 1;
 
-    if (ENABLE_WRITE_BUFFERING) {
+    if (buffering_target) {
         wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
         wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
         if (!wr_buffers) {
@@ -110,7 +117,7 @@ __attribute__((constructor)) static void init_buffers() {
         wr_buffers = NULL;
     }
 
-    if (ENABLE_READ_PREFETCH) {
+    if (prefetching_target) {
         pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
         pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
         if (!pf_buffers) {
@@ -174,8 +181,7 @@ static void log_msg(const char *fmt, ...) {
     in_log = 0;
 }
 
-static int get_cmdline(char* out) {
-    size_t out_size = sizeof(out);
+static int get_cmdline(char *out, size_t out_size) {
     if (!out || out_size < 2) return -1;
 
     char path[64];
@@ -186,7 +192,7 @@ static int get_cmdline(char* out) {
 
     if (fd < 0) return -1;
 
-    ssize_t bytes = syscall(SYS_read, fd, out, sizeof(out) - 1);
+    ssize_t bytes = syscall(SYS_read, fd, out, out_size - 1);
     syscall(SYS_close, fd);
 
     if (bytes > 0) {
@@ -198,6 +204,18 @@ static int get_cmdline(char* out) {
         }
     }
     return 0;
+}
+
+
+static int is_prefetching_target() {
+    char* target = "dwi_denoise";
+    return strstr(cmdline, target) != NULL;
+}
+
+
+static int is_buffering_target() {
+    char* target = "dwi_denoise";
+    return strstr(cmdline, target) != NULL;
 }
 
 // Statistics Functions
@@ -458,7 +476,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
         return original_write(fd, buf, count);
     }
 
-    if (!ENABLE_WRITE_BUFFERING) {
+    if (!buffering_target) {
         return original_write(fd, buf, count);
     }
 
@@ -508,11 +526,8 @@ ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
-    if (!ENABLE_READ_PREFETCH) {
-        ssize_t bytes = original_read(fd, buf, count);
-        update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
-        update_intercept_reads(bytes > 0 ? (size_t)bytes : 0);
-        return bytes;
+    if (!prefetching_target) {
+        return original_read(fd, buf, count);
     }
 
     pf_buffer_t *pb = get_prefetch_buffer(fd);
@@ -589,7 +604,9 @@ off_t lseek(int fd, off_t offset, int whence) {
     static original_lseek_t original_lseek = NULL;
     if (!original_lseek) original_lseek = (original_lseek_t)dlsym(RTLD_NEXT, "lseek");
 
-    if (flush_buffers(fd) < 0) return -1;
+    if (buffering_target || prefetching_target) {
+        if (flush_buffers(fd) < 0) return -1;
+    }
 
     return original_lseek(fd, offset, whence);
 }
@@ -599,8 +616,10 @@ int fsync(int fd) {
     static original_fsync_t original_fsync = NULL;
     if (!original_fsync) original_fsync = dlsym(RTLD_NEXT, "fsync");
 
-    if (flush_buffers(fd) < 0) return -1;
-
+    if (buffering_target || prefetching_target) {
+        if (flush_buffers(fd) < 0) return -1;
+    }
+    
     return original_fsync(fd);
 }
 
@@ -609,7 +628,9 @@ int fdatasync(int fd) {
     static original_fdatasync_t original_fdatasync = NULL;
     if (!original_fdatasync) original_fdatasync = dlsym(RTLD_NEXT, "fdatasync");
 
-    if (flush_buffers(fd) < 0) return -1;
+    if (buffering_target || prefetching_target) {
+        if (flush_buffers(fd) < 0) return -1;
+    }
 
     return original_fdatasync(fd);
 }
@@ -622,8 +643,8 @@ pid_t fork(void) {
     pid_t pid = original_fork();
 
     if (pid == 0) {
-        clear_write_buffers();
-        clear_prefetch_buffers();
+        if (buffering_target) clear_write_buffers();
+        if (prefetching_target) clear_prefetch_buffers();
     }
 
     return pid;
@@ -634,48 +655,55 @@ Clean up
 */
 
 __attribute__((destructor)) static void cleanup_buffers() {
-    for (int i = 0; i < wr_buffer_cap; i++) {
-        if (wr_buffers[i]) {
-            (void)flush_write_buffer(wr_buffers[i]);
-            free_write_buffer(wr_buffers[i]);
+    log_msg("%s\n", cmdline);
+
+    if (buffering_target) {
+        for (int i = 0; i < wr_buffer_cap; i++) {
+            if (wr_buffers[i]) {
+                (void)flush_write_buffer(wr_buffers[i]);
+                free_write_buffer(wr_buffers[i]);
+            }
         }
+        
+        free(wr_buffers);
+        wr_buffers = NULL;
+        wr_buffer_cap = 0;
+        
+        double intercept_wr_avg = intercept_writes
+            ? (double)intercept_wr_bytes / (double)intercept_writes
+            : 0.0;
+
+        double syscall_wr_avg = syscall_writes
+            ? (double)syscall_wr_bytes / (double)syscall_writes
+            : 0.0;
+
+        log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
+        log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+    }
+
+    if (prefetching_target) {
+        for (int i = 0; i < pf_buffer_cap; i++) {
+            if (pf_buffers[i]) {
+                free_prefetch_buffer(pf_buffers[i]);
+            }
+        }
+
+        free(pf_buffers);
+        pf_buffers = NULL;
+        pf_buffer_cap = 0;
+
+        double intercept_rd_avg = intercept_reads
+            ? (double)intercept_rd_bytes / (double)intercept_reads
+            : 0.0;
+
+        double syscall_rd_avg = syscall_reads
+            ? (double)syscall_rd_bytes / (double)syscall_reads
+            : 0.0;
+
+        log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
+        log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
     }
     
-    free(wr_buffers);
-    wr_buffers = NULL;
-    wr_buffer_cap = 0;
-
-    for (int i = 0; i < pf_buffer_cap; i++) {
-        if (pf_buffers[i]) {
-            free_prefetch_buffer(pf_buffers[i]);
-        }
-    }
-
-    free(pf_buffers);
-    pf_buffers = NULL;
-    pf_buffer_cap = 0;
-
-    double intercept_wr_avg = intercept_writes
-        ? (double)intercept_wr_bytes / (double)intercept_writes
-        : 0.0;
-
-    double syscall_wr_avg = syscall_writes
-        ? (double)syscall_wr_bytes / (double)syscall_writes
-        : 0.0;
-
-    double intercept_rd_avg = intercept_reads
-        ? (double)intercept_rd_bytes / (double)intercept_reads
-        : 0.0;
-
-    double syscall_rd_avg = syscall_reads
-        ? (double)syscall_rd_bytes / (double)syscall_reads
-        : 0.0;
-
-    log_msg("%s", cmdline);
-    log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
-    log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
-    log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
-    log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
     log_msg("Buffer library successfully unloaded\n");
 
     if (log_fd >= 0) {
