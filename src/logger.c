@@ -10,7 +10,10 @@
 #include <time.h>
 #include <sys/stat.h>
 
+
 #define LOG_FILE "/mnt/logger.log"
+
+static char cmdline[512];
 
 // Function Pointer Types for Original System Calls
 typedef int (*original_open_t)(const char *path, int flags, ...);
@@ -27,9 +30,9 @@ typedef int (*original_dup_t)(int fd);
 typedef int (*original_dup2_t)(int oldfd, int newfd);
 
 static __thread int in_log = 0;
+static int log_fd = -1;
 
 static void log_msg(const char *fmt, ...) {
-    static int log_fd = -1;
     if (in_log) return;
     in_log = 1;
 
@@ -43,7 +46,7 @@ static void log_msg(const char *fmt, ...) {
 
     char msg[512];
     char timestamp[64];
-    char logbuf[576];
+    char logbuf[704];
 
     time_t now = time(NULL);
     struct tm tm_info;
@@ -56,7 +59,14 @@ static void log_msg(const char *fmt, ...) {
     va_end(ap);
 
     if (n > 0) {
-        int total = snprintf(logbuf, sizeof(logbuf), "%s%s", timestamp, msg);
+        int total = snprintf(
+            logbuf,
+            sizeof(logbuf),
+            "%s[pid=%ld] %s",
+            timestamp,
+            (long)getpid(),
+            msg
+        );
         if (total > 0) {
             size_t len = (size_t)total < sizeof(logbuf) ? (size_t)total : sizeof(logbuf) - 1;
             syscall(SYS_write, log_fd, logbuf, len);
@@ -64,6 +74,36 @@ static void log_msg(const char *fmt, ...) {
     }
 
     in_log = 0;
+}
+
+static int get_cmdline(char *out, size_t out_size) {
+    if (!out || out_size < 2) return -1;
+
+    char path[64];
+    pid_t pid = getpid();
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+
+    int fd = syscall(SYS_open, path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    ssize_t bytes = syscall(SYS_read, fd, out, out_size - 1);
+    syscall(SYS_close, fd);
+
+    if (bytes > 0) {
+        out[bytes] = '\0';
+        for (ssize_t i = 0; i < bytes; i++) {
+            if (out[i] == '\0') {
+                out[i] = ' ';
+            }
+        }
+    }
+    return 0;
+}
+
+__attribute__((constructor)) static void logger_init() {
+    get_cmdline(cmdline, sizeof(cmdline));
+    log_msg("Initializing logger library...\n");
+    log_msg("%s\n", cmdline);
 }
 
 
@@ -83,7 +123,7 @@ int open(const char *path, int flags, ...) {
     }
     va_end(args);
 
-    log_msg("[pid=%d] open('%s', flags=0x%x) = %d\n", getpid(), path, flags, fd);
+    log_msg("open('%s', flags=0x%x) = %d\n", path, flags, fd);
     return fd;
 }
 
@@ -93,7 +133,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
     if (!original_write) original_write = (original_write_t)dlsym(RTLD_NEXT, "write");
 
     ssize_t bytes = original_write(fd, buf, count);
-    log_msg("[pid=%d] write(fd=%d, count=%zu) = %zd\n", getpid(), fd, count, bytes);
+    log_msg("write(fd=%d, count=%zu) = %zd\n", fd, count, bytes);
     return bytes;
 }
 
@@ -105,7 +145,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (!original_read) original_read = (original_read_t)dlsym(RTLD_NEXT, "read");
 
     ssize_t bytes = original_read(fd, buf, count);
-    log_msg("[pid=%d] read(fd=%d, count=%zu) = %zd\n", getpid(), fd, count, bytes);
+    log_msg("read(fd=%d, count=%zu) = %zd\n", fd, count, bytes);
     return bytes;
 }
 
@@ -116,7 +156,7 @@ int close(int fd) {
     if (!original_close) original_close = (original_close_t)dlsym(RTLD_NEXT, "close");
 
     int result = original_close(fd);
-    log_msg("[pid=%d] close(fd=%d) = %d\n", getpid(), fd, result);
+    log_msg("close(fd=%d) = %d\n", fd, result);
     return result;
 }
 
@@ -131,8 +171,8 @@ off_t lseek(int fd, off_t offset, int whence) {
                              (whence == SEEK_CUR) ? "SEEK_CUR" :
                              (whence == SEEK_END) ? "SEEK_END" : "UNKNOWN";
 
-    log_msg("[pid=%d] lseek(fd=%d, offset=%ld, whence=%s) = %ld\n",
-            getpid(), fd, (long)offset, whence_str, (long)result);
+    log_msg("lseek(fd=%d, offset=%ld, whence=%s) = %ld\n",
+            fd, (long)offset, whence_str, (long)result);
 
     return result;
 }
@@ -154,7 +194,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
     }
     va_end(args);
 
-    log_msg("[pid=%d] openat(dirfd=%d, path='%s', flags=0x%x) = %d\n", getpid(), dirfd, path, flags, fd);
+    log_msg("openat(dirfd=%d, path='%s', flags=0x%x) = %d\n", dirfd, path, flags, fd);
     return fd;
 }
 
@@ -164,7 +204,7 @@ ssize_t pread64(int fd, void *buf, size_t count, off_t offset) {
     if (!original_pread64) original_pread64 = (original_pread64_t)dlsym(RTLD_NEXT, "pread64");
 
     ssize_t bytes = original_pread64(fd, buf, count, offset);
-    log_msg("[pid=%d] pread64(fd=%d, count=%zu, offset=%ld) = %zd\n", getpid(), fd, count, (long)offset, bytes);
+    log_msg("pread64(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
     return bytes;
 }
 
@@ -174,7 +214,7 @@ int stat(const char *path, struct stat *buf) {
     if (!original_stat) original_stat = (original_stat_t)dlsym(RTLD_NEXT, "stat");
 
     int result = original_stat(path, buf);
-    log_msg("[pid=%d] stat(path='%s') = %d\n", getpid(), path, result);
+    log_msg("stat(path='%s') = %d\n", path, result);
     return result;
 }
 
@@ -184,7 +224,7 @@ int fstat(int fd, struct stat *buf) {
     if (!original_fstat) original_fstat = (original_fstat_t)dlsym(RTLD_NEXT, "fstat");
 
     int result = original_fstat(fd, buf);
-    log_msg("[pid=%d] fstat(fd=%d) = %d\n", getpid(), fd, result);
+    log_msg("fstat(fd=%d) = %d\n", fd, result);
     return result;
 }
 
@@ -194,7 +234,7 @@ pid_t fork(void) {
     if (!original_fork) original_fork = (original_fork_t)dlsym(RTLD_NEXT, "fork");
 
     pid_t pid = original_fork();
-    log_msg("[pid=%d] fork() = %d\n", getpid(), pid);
+    log_msg("fork() = %d\n", pid);
     return pid;
 }
 
@@ -204,7 +244,7 @@ int dup(int fd) {
     if (!original_dup) original_dup = (original_dup_t)dlsym(RTLD_NEXT, "dup");
 
     int newfd = original_dup(fd);
-    log_msg("[pid=%d] dup(fd=%d) = %d\n", getpid(), fd, newfd);
+    log_msg("dup(fd=%d) = %d\n", fd, newfd);
     return newfd;
 }
 
@@ -214,6 +254,6 @@ int dup2(int oldfd, int newfd) {
     if (!original_dup2) original_dup2 = (original_dup2_t)dlsym(RTLD_NEXT, "dup2");
 
     int result = original_dup2(oldfd, newfd);
-    log_msg("[pid=%d] dup2(oldfd=%d, newfd=%d) = %d\n", getpid(), oldfd, newfd, result);
+    log_msg("dup2(oldfd=%d, newfd=%d) = %d\n", oldfd, newfd, result);
     return result;
 }
