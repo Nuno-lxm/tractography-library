@@ -28,6 +28,18 @@ Configuration
 
 #define LOG_FILE "/mnt/buffer.log"
 
+static char *prefetching_targets[] = {
+    "dwidenoise",
+    //"fslmaths",
+    NULL
+};
+
+static char *buffering_targets[] = {
+    "dwidenoise",
+    "fslmaths",
+    NULL
+};
+
 /*
 Function Pointer Types for Original System Calls
 */
@@ -210,14 +222,22 @@ static int get_cmdline(char *out, size_t out_size) {
 
 
 static int is_prefetching_target() {
-    char* target = "dwi_denoise";
-    return strstr(cmdline, target) != NULL;
+    for (char **t = prefetching_targets; *t; t++) {
+        if (strstr(cmdline, *t)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 
 static int is_buffering_target() {
-    char* target = "dwi_denoise";
-    return strstr(cmdline, target) != NULL;
+    for (char **t = buffering_targets; *t; t++) {
+        if (strstr(cmdline, *t)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Statistics Functions
@@ -528,6 +548,15 @@ ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
+    // Flush write buffer before reading to maintain read-after-write consistency
+    // ADD COUNT
+    wr_buffer_t *wb = get_write_buffer(fd);
+    if (wb && wb->buffer_pos > 0) {
+        if (flush_write_buffer(wb) < 0) {
+            return -1;
+        }
+    }
+
     if (!prefetching_target) {
         return original_read(fd, buf, count);
     }
@@ -543,8 +572,9 @@ ssize_t read(int fd, void *buf, size_t count) {
             return bytes;
         }
     }
-
-    if (count <= pb->data_size - pb->buffer_pos) { // If requested data is in buffer
+    
+    // If requested data is in buffer
+    if (count <= pb->data_size - pb->buffer_pos) {
         memcpy(buf, pb->buffer + pb->buffer_pos, count);
         pb->buffer_pos += count;
         update_intercept_reads(count);
@@ -555,7 +585,8 @@ ssize_t read(int fd, void *buf, size_t count) {
     size_t total_read = 0;
     size_t needed = count;
 
-    if (pb->buffer_pos < pb->data_size) { // If some data is in buffer
+    // If some data is in buffer
+    if (pb->buffer_pos < pb->data_size) {
         size_t remaining = pb->data_size - pb->buffer_pos;
         
         memcpy(out, pb->buffer + pb->buffer_pos, remaining);
