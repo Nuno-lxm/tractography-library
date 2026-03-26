@@ -95,6 +95,8 @@ static unsigned long syscall_reads = 0;
 static size_t intercept_rd_bytes = 0;
 static size_t syscall_rd_bytes = 0;
 
+static unsigned long flush_on_reads = 0;
+
 /*
 Forward Declarations
 */
@@ -549,11 +551,12 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
     // Flush write buffer before reading to maintain read-after-write consistency
-    // ADD COUNT
-    wr_buffer_t *wb = get_write_buffer(fd);
-    if (wb && wb->buffer_pos > 0) {
-        if (flush_write_buffer(wb) < 0) {
-            return -1;
+    if (buffering_target) {
+        wr_buffer_t *wb = get_write_buffer(fd);
+        
+        if (wb && wb->buffer_pos > 0) {
+            flush_on_reads++;
+            if (flush_write_buffer(wb) < 0) return -1;
         }
     }
 
@@ -733,6 +736,7 @@ __attribute__((destructor)) static void cleanup_buffers() {
 
         log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
         log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
+        log_msg("flush_on_reads=%lu\n", flush_on_reads);
     }
     
     if (log_fd >= 0) {
