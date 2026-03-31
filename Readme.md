@@ -51,6 +51,10 @@ The config files will automatically set `LD_PRELOAD` for the relevant processes 
 - These configs set the `LD_PRELOAD` environment variable for relevant processes, ensuring the library is loaded only where beneficial.
 - Place the config files in your Nextflow pipeline directory and include them in your `nextflow.config` or via the `-c` option.
 
+
+## Testing
+- To test the library, you can use the provided `src/test.c` file. To enable interception for the test program, add `test` to the target list in the source code (see `buffering_targets` and `prefetching_targets` arrays in `src/buffer_lib.c`).
+
 ## Notes
 - Only the specified target commands will have their I/O intercepted.
 - The library is safe to use in multi-process environments and handles forked processes correctly.
