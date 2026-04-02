@@ -30,7 +30,7 @@ Configuration
 
 static char *prefetching_targets[] = {
     "dwidenoise",
-    //"fslmaths",
+    "fslmaths",
     NULL
 };
 
@@ -110,7 +110,14 @@ static char cmdline[512];
 static int buffering_target = 0;
 static int prefetching_target = 0;
 
-__attribute__((constructor)) static void init_buffers() {
+__attribute__((constructor)) static void init_buffers();
+__attribute__((destructor)) static void cleanup_buffers();
+
+/*
+Intialization
+*/
+
+static void init_buffers() {
     get_cmdline(cmdline, sizeof(cmdline));
     
     if (ENABLE_WRITE_BUFFERING && is_buffering_target()) buffering_target = 1;
@@ -120,6 +127,8 @@ __attribute__((constructor)) static void init_buffers() {
 
     log_msg("Initializing buffer library...\n");
     log_msg("%s\n", cmdline);
+    log_msg("Buffering: %d\n", buffering_target);
+    log_msg("Prefetching: %d\n", prefetching_target);
 
     if (buffering_target) {
         wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
@@ -617,14 +626,13 @@ ssize_t read(int fd, void *buf, size_t count) {
         if (bytes <= 0) {
             update_intercept_reads(total_read);
             return total_read > 0 ? total_read : bytes;
-        } else if (bytes < needed) {
-            needed = bytes; // Adjust needed if we read less than requested
         }
     
-        pb->data_size = bytes;
-        memcpy(out, pb->buffer, needed);
-        pb->buffer_pos = needed;
-        total_read += needed;
+        pb->data_size = (size_t)bytes;
+        size_t to_copy = (size_t)bytes < needed ? (size_t)bytes : needed;
+        memcpy(out, pb->buffer, to_copy);
+        pb->buffer_pos = to_copy;
+        total_read += to_copy;
     }
 
     update_intercept_reads(total_read);
@@ -690,7 +698,7 @@ pid_t fork(void) {
 Clean up
 */
 
-__attribute__((destructor)) static void cleanup_buffers() {
+static void cleanup_buffers() {
     if (buffering_target) {
         for (int i = 0; i < wr_buffer_cap; i++) {
             if (wr_buffers[i]) {
