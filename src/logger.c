@@ -21,7 +21,9 @@ typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
+typedef off64_t (*original_lseek64_t)(int fd, off64_t offset, int whence);
 typedef int (*original_openat_t)(int dirfd, const char *path, int flags, ...);
+typedef ssize_t (*original_pread_t)(int fd, void *buf, size_t count, off_t offset);
 typedef ssize_t (*original_pread64_t)(int fd, void *buf, size_t count, off_t offset);
 typedef int (*original_stat_t)(const char *path, struct stat *buf);
 typedef int (*original_fstat_t)(int fd, struct stat *buf);
@@ -178,6 +180,44 @@ off_t lseek(int fd, off_t offset, int whence) {
 }
 
 
+off64_t lseek64(int fd, off64_t offset, int whence) {
+    static original_lseek64_t original_lseek64 = NULL;
+    if (!original_lseek64) original_lseek64 = (original_lseek64_t)dlsym(RTLD_NEXT, "lseek64");
+
+    off64_t result = original_lseek64
+        ? original_lseek64(fd, offset, whence)
+        : (off64_t)syscall(SYS_lseek, fd, (off_t)offset, whence);
+
+    const char *whence_str = (whence == SEEK_SET) ? "SEEK_SET" :
+                             (whence == SEEK_CUR) ? "SEEK_CUR" :
+                             (whence == SEEK_END) ? "SEEK_END" : "UNKNOWN";
+
+    log_msg("lseek64(fd=%d, offset=%lld, whence=%s) = %lld\n",
+            fd, (long long)offset, whence_str, (long long)result);
+
+    return result;
+}
+
+
+off64_t __lseek64(int fd, off64_t offset, int whence) {
+    static original_lseek64_t original___lseek64 = NULL;
+    if (!original___lseek64) original___lseek64 = (original_lseek64_t)dlsym(RTLD_NEXT, "__lseek64");
+
+    off64_t result = original___lseek64
+        ? original___lseek64(fd, offset, whence)
+        : (off64_t)syscall(SYS_lseek, fd, (off_t)offset, whence);
+
+    const char *whence_str = (whence == SEEK_SET) ? "SEEK_SET" :
+                             (whence == SEEK_CUR) ? "SEEK_CUR" :
+                             (whence == SEEK_END) ? "SEEK_END" : "UNKNOWN";
+
+    log_msg("__lseek64(fd=%d, offset=%lld, whence=%s) = %lld\n",
+            fd, (long long)offset, whence_str, (long long)result);
+
+    return result;
+}
+
+
 int openat(int dirfd, const char *path, int flags, ...) {
     static original_openat_t original_openat = NULL;
     if (!original_openat) original_openat = (original_openat_t)dlsym(RTLD_NEXT, "openat");
@@ -205,6 +245,16 @@ ssize_t pread64(int fd, void *buf, size_t count, off_t offset) {
 
     ssize_t bytes = original_pread64(fd, buf, count, offset);
     log_msg("pread64(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
+    return bytes;
+}
+
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    static original_pread_t original_pread = NULL;
+    if (!original_pread) original_pread = (original_pread_t)dlsym(RTLD_NEXT, "pread");
+
+    ssize_t bytes = original_pread(fd, buf, count, offset);
+    log_msg("pread(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
     return bytes;
 }
 
