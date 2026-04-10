@@ -52,6 +52,7 @@ typedef ssize_t (*original_pwrite_t)(int fd, const void *buf, size_t count, off_
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
+typedef off64_t (*original_lseek64_t)(int fd, off64_t offset, int whence);
 typedef int (*original_fsync_t)(int fd);
 typedef int (*original_fdatasync_t)(int fd);
 typedef pid_t (*original_fork_t)(void);
@@ -838,6 +839,27 @@ off_t lseek(int fd, off_t offset, int whence) {
     if (state && result >= 0) {
         state->kernel_offset = result;
         state->logical_offset = result;
+    }
+    return result;
+}
+
+
+off64_t lseek64(int fd, off64_t offset, int whence) {
+    static original_lseek64_t original_lseek64 = NULL;
+    if (!original_lseek64) original_lseek64 = (original_lseek64_t)dlsym(RTLD_NEXT, "lseek64");
+
+    fd_state_t *state = (buffering_target || prefetching_target)
+        ? get_or_create_fd_state(fd)
+        : NULL;
+
+    if (buffering_target || prefetching_target) {
+        if (flush_buffers(fd) < 0) return -1;
+    }
+
+    off64_t result = original_lseek64(fd, offset, whence);
+    if (state && result >= 0) {
+        state->kernel_offset = (off_t)result;
+        state->logical_offset = (off_t)result;
     }
     return result;
 }
