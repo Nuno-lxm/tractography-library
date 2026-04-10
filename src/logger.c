@@ -129,6 +129,58 @@ int open(const char *path, int flags, ...) {
     return fd;
 }
 
+int open64(const char *path, int flags, ...) {
+    static original_open_t original_open64 = NULL;
+    if (!original_open64) original_open64 = (original_open_t)dlsym(RTLD_NEXT, "open64");
+
+    va_list args;
+    va_start(args, flags);
+    int fd = -1;
+
+    if (flags & O_CREAT) {
+        mode_t mode = va_arg(args, mode_t);
+        if (original_open64)
+            fd = original_open64(path, flags, mode);
+    } else {
+        if (original_open64)
+            fd = original_open64(path, flags);
+    }
+    va_end(args);
+
+    log_msg("open64('%s', flags=0x%x) = %d\\n", path, flags, fd);
+    return fd;
+}
+
+typedef FILE *(*original_fopen64_t)(const char *path, const char *mode);
+FILE *fopen64(const char *path, const char *mode) {
+    static original_fopen64_t original_fopen64 = NULL;
+    if (!original_fopen64) original_fopen64 = (original_fopen64_t)dlsym(RTLD_NEXT, "fopen64");
+    FILE *f = NULL;
+    if (original_fopen64) f = original_fopen64(path, mode);
+    log_msg("fopen64('%s', mode='%s') = %p\\n", path, mode, (void*)f);
+    return f;
+}
+
+typedef int (*original_stat64_t)(const char *path, struct stat64 *buf);
+int stat64(const char *path, struct stat64 *buf) {
+    static original_stat64_t original_stat64 = NULL;
+    if (!original_stat64) original_stat64 = (original_stat64_t)dlsym(RTLD_NEXT, "stat64");
+    int res = -1;
+    if (original_stat64) res = original_stat64(path, buf);
+    log_msg("stat64('%s') = %d\\n", path, res);
+    return res;
+}
+
+typedef int (*original_fstat64_t)(int fd, struct stat64 *buf);
+int fstat64(int fd, struct stat64 *buf) {
+    static original_fstat64_t original_fstat64 = NULL;
+    if (!original_fstat64) original_fstat64 = (original_fstat64_t)dlsym(RTLD_NEXT, "fstat64");
+    int res = -1;
+    if (original_fstat64) res = original_fstat64(fd, buf);
+    log_msg("fstat64(fd=%d) = %d\\n", fd, res);
+    return res;
+}
+
 
 ssize_t write(int fd, const void *buf, size_t count) {
     static original_write_t original_write = NULL;
@@ -255,6 +307,29 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
 
     ssize_t bytes = original_pread(fd, buf, count, offset);
     log_msg("pread(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
+    return bytes;
+}
+
+typedef ssize_t (*original_pwrite_t)(int fd, const void *buf, size_t count, off_t offset);
+typedef ssize_t (*original_pwrite64_t)(int fd, const void *buf, size_t count, off_t offset);
+
+ssize_t pwrite64(int fd, const void *buf, size_t count, off_t offset) {
+    static original_pwrite64_t original_pwrite64 = NULL;
+    if (!original_pwrite64) original_pwrite64 = (original_pwrite64_t)dlsym(RTLD_NEXT, "pwrite64");
+
+    ssize_t bytes = -1;
+    if (original_pwrite64) bytes = original_pwrite64(fd, buf, count, offset);
+    log_msg("pwrite64(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
+    return bytes;
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    static original_pwrite_t original_pwrite = NULL;
+    if (!original_pwrite) original_pwrite = (original_pwrite_t)dlsym(RTLD_NEXT, "pwrite");
+
+    ssize_t bytes = -1;
+    if (original_pwrite) bytes = original_pwrite(fd, buf, count, offset);
+    log_msg("pwrite(fd=%d, count=%zu, offset=%ld) = %zd\n", fd, count, (long)offset, bytes);
     return bytes;
 }
 
