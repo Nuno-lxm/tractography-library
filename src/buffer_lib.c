@@ -40,6 +40,12 @@ static char *buffering_targets[] = {
     NULL
 };
 
+static char *log_file_path = LOG_FILE;
+static char **prefetch_target_list = prefetching_targets;
+static char **buffer_target_list = buffering_targets;
+static char **env_prefetch_targets = NULL;
+static char **env_buffer_targets = NULL;
+
 /*
 Function Pointer Types for Original System Calls
 */
@@ -105,6 +111,9 @@ static void log_msg(const char *fmt, ...);
 static int get_cmdline(char *out, size_t out_size);
 static int is_buffering_target();
 static int is_prefetching_target();
+static void init_config_from_env(void);
+static char **split_target_list(const char *value);
+static void free_target_list(char **list);
 
 static char cmdline[512];
 static int buffering_target = 0;
@@ -119,6 +128,8 @@ Intialization
 
 static void init_buffers() {
     get_cmdline(cmdline, sizeof(cmdline));
+
+    init_config_from_env();
     
     if (ENABLE_WRITE_BUFFERING && is_buffering_target()) buffering_target = 1;
     if (ENABLE_READ_PREFETCH && is_prefetching_target()) prefetching_target = 1;
@@ -167,7 +178,8 @@ static void log_msg(const char *fmt, ...) {
     in_log = 1;
 
     if (log_fd == -1) {
-        log_fd = syscall(SYS_open, LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        const char *path = log_file_path ? log_file_path : LOG_FILE;
+        log_fd = syscall(SYS_open, path, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (log_fd < 0) {
             in_log = 0;
             return;
@@ -231,9 +243,94 @@ static int get_cmdline(char *out, size_t out_size) {
     return 0;
 }
 
+static int is_target_delim(char c) {
+    return c == ',' || c == ' ' || c == '\t' || c == '\n' || c == ';';
+}
+
+static char **split_target_list(const char *value) {
+    if (!value) return NULL;
+
+    while (*value && is_target_delim(*value)) {
+        value++;
+    }
+    if (*value == '\0') return NULL;
+
+    size_t count = 0;
+    const char *p = value;
+    while (*p) {
+        while (*p && is_target_delim(*p)) p++;
+        if (!*p) break;
+        count++;
+        while (*p && !is_target_delim(*p)) p++;
+    }
+
+    if (count == 0) return NULL;
+
+    char **list = calloc(count + 1, sizeof(*list));
+    if (!list) return NULL;
+
+    size_t idx = 0;
+    p = value;
+    while (*p && idx < count) {
+        while (*p && is_target_delim(*p)) p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && !is_target_delim(*p)) p++;
+        size_t len = (size_t)(p - start);
+        char *token = strndup(start, len);
+        if (!token) {
+            free_target_list(list);
+            return NULL;
+        }
+        list[idx++] = token;
+    }
+
+    list[idx] = NULL;
+    return list;
+}
+
+static void free_target_list(char **list) {
+    if (!list) return;
+    for (size_t i = 0; list[i]; i++) {
+        free(list[i]);
+    }
+    free(list);
+}
+
+static void init_config_from_env(void) {
+    const char *log_env = getenv("BUFFER_LOG_FILE");
+    if (log_env && *log_env) {
+        log_file_path = (char *)log_env;
+    }
+
+    const char *prefetch_env = getenv("BUFFER_PREFETCH_TARGETS");
+    if (prefetch_env) {
+        char **list = split_target_list(prefetch_env);
+        if (list || *prefetch_env == '\0') {
+            env_prefetch_targets = list;
+            prefetch_target_list = list;
+        } else {
+            log_msg("Failed to parse BUFFER_PREFETCH_TARGETS\n");
+        }
+    }
+
+    const char *buffer_env = getenv("BUFFER_WRITE_TARGETS");
+    if (buffer_env) {
+        char **list = split_target_list(buffer_env);
+        if (list || *buffer_env == '\0') {
+            env_buffer_targets = list;
+            buffer_target_list = list;
+        } else {
+            log_msg("Failed to parse BUFFER_WRITE_TARGETS\n");
+        }
+    }
+}
+
 
 static int is_prefetching_target() {
-    for (char **t = prefetching_targets; *t; t++) {
+    if (!prefetch_target_list) return 0;
+
+    for (char **t = prefetch_target_list; *t; t++) {
         if (strstr(cmdline, *t)) {
             return 1;
         }
@@ -243,7 +340,9 @@ static int is_prefetching_target() {
 
 
 static int is_buffering_target() {
-    for (char **t = buffering_targets; *t; t++) {
+    if (!buffer_target_list) return 0;
+
+    for (char **t = buffer_target_list; *t; t++) {
         if (strstr(cmdline, *t)) {
             return 1;
         }
@@ -745,6 +844,16 @@ static void cleanup_buffers() {
         log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
         log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
         log_msg("flush_on_reads=%lu\n", flush_on_reads);
+    }
+
+    if (env_prefetch_targets) {
+        free_target_list(env_prefetch_targets);
+        env_prefetch_targets = NULL;
+    }
+
+    if (env_buffer_targets) {
+        free_target_list(env_buffer_targets);
+        env_buffer_targets = NULL;
     }
     
     if (log_fd >= 0) {
