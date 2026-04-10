@@ -23,7 +23,7 @@ report_file="$output_dir/report_local_mgh1_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_local_mgh1_${SLURM_JOB_ID}.html"
 trace_file="$output_dir/trace_local_mgh1_${SLURM_JOB_ID}.txt"
 
-config_file="$project_dir/tractography-library/config-files/nextflow-logger.config"
+config_file="$project_dir/tractography-library/config-files/deucalion/logger-deucalion.config"
 
 vmstat 5 > "$output_dir"/vmstat_local_mgh1_${SLURM_JOB_ID}.log &
 VMSTAT_PID=$!
