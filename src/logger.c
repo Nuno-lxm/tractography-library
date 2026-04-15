@@ -129,6 +129,7 @@ int open(const char *path, int flags, ...) {
     return fd;
 }
 
+
 int open64(const char *path, int flags, ...) {
     static original_open_t original_open64 = NULL;
     if (!original_open64) original_open64 = (original_open_t)dlsym(RTLD_NEXT, "open64");
@@ -151,6 +152,7 @@ int open64(const char *path, int flags, ...) {
     return fd;
 }
 
+
 typedef FILE *(*original_fopen64_t)(const char *path, const char *mode);
 FILE *fopen64(const char *path, const char *mode) {
     static original_fopen64_t original_fopen64 = NULL;
@@ -161,6 +163,7 @@ FILE *fopen64(const char *path, const char *mode) {
     return f;
 }
 
+
 typedef int (*original_stat64_t)(const char *path, struct stat64 *buf);
 int stat64(const char *path, struct stat64 *buf) {
     static original_stat64_t original_stat64 = NULL;
@@ -170,6 +173,7 @@ int stat64(const char *path, struct stat64 *buf) {
     log_msg("stat64('%s') = %d\\n", path, res);
     return res;
 }
+
 
 typedef int (*original_fstat64_t)(int fd, struct stat64 *buf);
 int fstat64(int fd, struct stat64 *buf) {
