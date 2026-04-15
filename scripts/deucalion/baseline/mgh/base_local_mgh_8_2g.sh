@@ -28,6 +28,15 @@ mkdir -p "$output_dir"
 vmstat 5 > "$output_dir"/vmstat_local_mgh8_2g_${SLURM_JOB_ID}.log &
 VMSTAT_PID=$!
 
+GPU_LOG="$output_dir/gpu_local_mgh8_2g_${SLURM_JOB_ID}.log"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=timestamp,index,uuid,utilization.gpu,utilization.memory,memory.total,memory.used,temperature.gpu,power.draw \
+        --format=csv -l 5 > "$GPU_LOG" &
+    GPU_PID=$!
+else
+    echo "nvidia-smi not found" > "$GPU_LOG"
+fi
+
 NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tractoflow/main.nf \
     -with-singularity /projects/I20240002/nunolxm/tractoflow_files/scilus_1.6.0.sif \
     -profile use_gpu \
@@ -52,5 +61,8 @@ NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tracto
     --output_dir="$results_dir"
 
 kill $VMSTAT_PID
+if [ -n "${GPU_PID:-}" ]; then
+    kill "$GPU_PID"
+fi
 
 exit 0
