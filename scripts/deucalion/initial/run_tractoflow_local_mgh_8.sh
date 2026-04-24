@@ -31,7 +31,7 @@ NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tracto
     --run_pft_tracking false \
     --run_local_tracking true \
     --local_seeding npv \
-    --local_nbr_seeds 15\
+    --local_nbr_seeds 15 \
     --processes 32 \
     --processes_brain_extraction_t1 16 \
     --processes_denoise_dwi 16 \
