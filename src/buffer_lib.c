@@ -31,14 +31,10 @@ Configuration
 #define LOG_FILE "/mnt/buffer.log"
 
 static char *prefetching_targets[] = {
-    "dwidenoise",
-    "fslmaths",
     NULL
 };
 
 static char *buffering_targets[] = {
-    "dwidenoise",
-    "fslmaths",
     NULL
 };
 
