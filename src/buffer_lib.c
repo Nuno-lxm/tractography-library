@@ -119,14 +119,13 @@ Forward Declarations
 */
 
 static void log_msg(const char *fmt, ...);
-static int get_cmdline(char *out, size_t out_size);
-static int is_buffering_target();
-static int is_prefetching_target();
+static int get_process_name(char *out, size_t out_size);
+static int target_list_matches_process_name(char **target_list);
 static void init_config_from_env(void);
 static char **split_target_list(const char *value);
 static void free_target_list(char **list);
 
-static char cmdline[512];
+static char process_name[256];
 static int buffering_target = 0;
 static int prefetching_target = 0;
 
@@ -138,17 +137,17 @@ Intialization
 */
 
 static void init_buffers() {
-    get_cmdline(cmdline, sizeof(cmdline));
+    get_process_name(process_name, sizeof(process_name));
 
     init_config_from_env();
     
-    if (ENABLE_WRITE_BUFFERING && is_buffering_target()) buffering_target = 1;
-    if (ENABLE_READ_PREFETCH && is_prefetching_target()) prefetching_target = 1;
+    if (ENABLE_WRITE_BUFFERING && target_list_matches_process_name(buffer_target_list)) buffering_target = 1;
+    if (ENABLE_READ_PREFETCH && target_list_matches_process_name(prefetch_target_list)) prefetching_target = 1;
 
     if (!buffering_target && !prefetching_target) return;
 
     log_msg("Initializing buffer library...\n");
-    log_msg("%s\n", cmdline);
+    log_msg("%s\n", process_name[0] ? process_name : "unknown");
     log_msg("Buffering: %d\n", buffering_target);
     log_msg("Prefetching: %d\n", prefetching_target);
 
@@ -229,28 +228,34 @@ static void log_msg(const char *fmt, ...) {
     in_log = 0;
 }
 
-static int get_cmdline(char *out, size_t out_size) {
+static int get_process_name(char *out, size_t out_size) {
     if (!out || out_size < 2) return -1;
 
-    char path[64];
-    pid_t pid = getpid();
-    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    out[0] = '\0';
+    char exe_path[1024];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0) return -1;
 
-    int fd = syscall(SYS_open, path, O_RDONLY);
+    exe_path[(size_t)len] = '\0';
 
-    if (fd < 0) return -1;
+    const char *base = strrchr(exe_path, '/');
+    base = base ? base + 1 : exe_path;
 
-    ssize_t bytes = syscall(SYS_read, fd, out, out_size - 1);
-    syscall(SYS_close, fd);
+    if (!*base) return -1;
 
-    if (bytes > 0) {
-        out[bytes] = '\0';
-        for (ssize_t i = 0; i < bytes; i++) {
-            if (out[i] == '\0') {
-                out[i] = ' ';
-            }
+    snprintf(out, out_size, "%s", base);
+    return 0;
+}
+
+static int target_list_matches_process_name(char **target_list) {
+    if (!target_list || !process_name[0]) return 0;
+
+    for (char **t = target_list; *t; t++) {
+        if (strcmp(process_name, *t) == 0) {
+            return 1;
         }
     }
+
     return 0;
 }
 
@@ -337,29 +342,6 @@ static void init_config_from_env(void) {
     }
 }
 
-
-static int is_prefetching_target() {
-    if (!prefetch_target_list) return 0;
-
-    for (char **t = prefetch_target_list; *t; t++) {
-        if (strstr(cmdline, *t)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-
-static int is_buffering_target() {
-    if (!buffer_target_list) return 0;
-
-    for (char **t = buffer_target_list; *t; t++) {
-        if (strstr(cmdline, *t)) {
-            return 1;
-        }
-    }
-    return 0;
-}
 
 // Statistics Functions
 
