@@ -23,7 +23,9 @@ Configuration
 #define WRITE_BUFFER_SIZE (64 * 1024) // 64KB
 #define INITIAL_WRITE_BUFFER_COUNT 64
 
-#define PREFETCH_BUFFER_SIZE (64 * 1024) // 64KB
+#define INITIAL_PREFETCH_BUFFER_SIZE (64 * 1024) // 64KB
+#define MAX_PREFETCH_BUFFER_SIZE (4 * 1024 * 1024) // 4MB
+#define PREFETCH_BUFFER_GROWTH_TRIGGER 3
 #define INITIAL_PREFETCH_BUFFER_COUNT 64
 
 #define INITIAL_FD_STATE_COUNT 64
@@ -51,6 +53,8 @@ Function Pointer Types for Original System Calls
 typedef int (*original_open_t)(const char *path, int flags, ...);
 typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
 typedef ssize_t (*original_pwrite_t)(int fd, const void *buf, size_t count, off_t offset);
+typedef ssize_t (*original_pread_t)(int fd, void *buf, size_t count, off_t offset);
+typedef ssize_t (*original_pread64_t)(int fd, void *buf, size_t count, off64_t offset);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
 typedef int (*original_close_t)(int fd);
 typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
@@ -80,8 +84,10 @@ typedef struct { // Write Buffers
 typedef struct { // Prefetch Buffers
     int fd;
     char *buffer;
+    size_t buffer_size;
     size_t buffer_pos;
     size_t data_size;
+    size_t consecutive_miss_count;
     fd_state_t *state;
 } pf_buffer_t;
 
@@ -445,6 +451,57 @@ static void advance_logical_offset(fd_state_t *state, ssize_t delta) {
     state->logical_offset += (off_t)delta;
 }
 
+static int resize_prefetch_buffer(pf_buffer_t *pb, size_t new_size) {
+    if (!pb || new_size == 0 || new_size == pb->buffer_size) return 0;
+
+    char *new_buffer = realloc(pb->buffer, new_size);
+    if (!new_buffer) return -1;
+
+    pb->buffer = new_buffer;
+    pb->buffer_size = new_size;
+
+    if (pb->buffer_pos > pb->data_size) {
+        pb->buffer_pos = pb->data_size;
+    }
+
+    return 0;
+}
+
+static void reset_prefetch_growth_state(pf_buffer_t *pb) {
+    if (!pb) return;
+    pb->consecutive_miss_count = 0;
+}
+
+static int note_prefetch_miss(pf_buffer_t *pb) {
+    if (!pb) return 0;
+    if (pb->buffer_size >= MAX_PREFETCH_BUFFER_SIZE) {
+        reset_prefetch_growth_state(pb);
+        return 0;
+    }
+
+    pb->consecutive_miss_count++;
+    if (pb->consecutive_miss_count < PREFETCH_BUFFER_GROWTH_TRIGGER) {
+        return 0;
+    }
+
+    size_t new_size = pb->buffer_size ? pb->buffer_size * 2 : INITIAL_PREFETCH_BUFFER_SIZE;
+    if (new_size < INITIAL_PREFETCH_BUFFER_SIZE) {
+        new_size = INITIAL_PREFETCH_BUFFER_SIZE;
+    }
+    if (new_size > MAX_PREFETCH_BUFFER_SIZE) {
+        new_size = MAX_PREFETCH_BUFFER_SIZE;
+    }
+
+    if (new_size > pb->buffer_size) {
+        if (resize_prefetch_buffer(pb, new_size) < 0) {
+            log_msg("Failed to grow prefetch buffer for fd=%d to %zu bytes\n", pb->fd, new_size);
+        }
+    }
+
+    reset_prefetch_growth_state(pb);
+    return 1;
+}
+
 static int sync_kernel_to_logical(int fd, fd_state_t *state) {
     if (!state) return 0;
     if (state->seekable == 0) return 0;
@@ -585,12 +642,15 @@ static pf_buffer_t* allocate_prefetch_buffer(int fd) {
     if (!pb) return NULL;
     
     pb->fd = fd;
-    pb->buffer = malloc(PREFETCH_BUFFER_SIZE);
+    pb->buffer_size = INITIAL_PREFETCH_BUFFER_SIZE;
+    pb->buffer = malloc(pb->buffer_size);
     if (!pb->buffer) {
         free(pb);
         return NULL;
     }
     pb->buffer_pos = 0;
+    pb->data_size = 0;
+    pb->consecutive_miss_count = 0;
     pb->state = get_or_create_fd_state(fd);
 
     pf_buffers[fd] = pb;
@@ -777,8 +837,38 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
     if (!original_pwrite) original_pwrite = dlsym(RTLD_NEXT, "pwrite");
     
     if (flush_buffers(fd) < 0) return -1;
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        reset_prefetch_growth_state(pb);
+    }
 
     return original_pwrite(fd, buf, count, offset);
+}
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    static original_pread_t original_pread = NULL;
+    if (!original_pread) original_pread = dlsym(RTLD_NEXT, "pread");
+
+    if (flush_buffers(fd) < 0) return -1;
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        reset_prefetch_growth_state(pb);
+    }
+
+    return original_pread(fd, buf, count, offset);
+}
+
+ssize_t pread64(int fd, void *buf, size_t count, off64_t offset) {
+    static original_pread64_t original_pread64 = NULL;
+    if (!original_pread64) original_pread64 = dlsym(RTLD_NEXT, "pread64");
+
+    if (flush_buffers(fd) < 0) return -1;
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        reset_prefetch_growth_state(pb);
+    }
+
+    return original_pread64(fd, buf, count, offset);
 }
 
 // Read operations
@@ -860,7 +950,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         needed -= remaining;
     }
 
-    if (needed > PREFETCH_BUFFER_SIZE) {
+    if (needed > pb->buffer_size) {
         ssize_t bytes = original_read(fd, out, needed);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(state, bytes);
@@ -872,8 +962,9 @@ ssize_t read(int fd, void *buf, size_t count) {
         }
 
         total_read += bytes;
+        note_prefetch_miss(pb);
     } else {
-        ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
+        ssize_t bytes = original_read(fd, pb->buffer, pb->buffer_size);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(state, bytes);
     
@@ -888,6 +979,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         memcpy(out, pb->buffer, to_copy);
         pb->buffer_pos = to_copy;
         total_read += to_copy;
+        note_prefetch_miss(pb);
     }
 
     update_intercept_reads(total_read);
@@ -917,6 +1009,10 @@ off_t lseek(int fd, off_t offset, int whence) {
         state->kernel_offset = result;
         state->logical_offset = result;
     }
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        reset_prefetch_growth_state(pb);
+    }
     return result;
 }
 
@@ -937,6 +1033,10 @@ off64_t lseek64(int fd, off64_t offset, int whence) {
     if (state && result >= 0) {
         state->kernel_offset = (off_t)result;
         state->logical_offset = (off_t)result;
+    }
+    pf_buffer_t *pb = get_prefetch_buffer(fd);
+    if (pb) {
+        reset_prefetch_growth_state(pb);
     }
     return result;
 }
