@@ -146,11 +146,11 @@ static void init_buffers() {
 
     if (!buffering_target && !prefetching_target) return;
 
-    log_msg("Initializing buffer library...\n");
-    log_msg("%s\n", process_name[0] ? process_name : "unknown");
-    log_msg("Buffering: %d\n", buffering_target);
-    log_msg("Prefetching: %d\n", prefetching_target);
-
+    log_msg("Initializing buffer library...\n%s\nBuffering: %d; Prefetching: %d\n",
+        process_name[0] ? process_name : "unknown",
+        buffering_target,
+        prefetching_target);
+        
     if (buffering_target) {
         wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
         wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
