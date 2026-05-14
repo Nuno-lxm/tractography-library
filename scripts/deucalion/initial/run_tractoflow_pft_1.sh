@@ -21,7 +21,7 @@ report_file="/projects/I20240002/nunolxm/output/pft_1/report_pft_1_${SLURM_JOB_I
 timeline_file="/projects/I20240002/nunolxm/output/pft_1/timeline_pft_1_${SLURM_JOB_ID}.html"
 trace_file="/projects/I20240002/nunolxm/output/pft_1/trace_pft_1_${SLURM_JOB_ID}.txt"
 
-vmstat 5 > /projects/I20240002/nunolxm/output/pft_1/vmstat_pft_1_${SLURM_JOB_ID}.log &
+vmstat -S M 5 > /projects/I20240002/nunolxm/output/pft_1/vmstat_pft_1_${SLURM_JOB_ID}.log &
 VMSTAT_PID=$!
 
 LD_PRELOAD=/projects/I20240002/nunolxm/ld_preload/tests/logger/intercep_log.so \ 

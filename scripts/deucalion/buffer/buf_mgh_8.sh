@@ -28,7 +28,7 @@ config_file="$project_dir/tractography-library/config-files/deucalion/bet-prelim
 mkdir -p "$output_dir"
 
 (
-    vmstat 5 | while IFS= read -r line; do
+    vmstat -S M 5 | while IFS= read -r line; do
             printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line"
     done > "$output_dir"/vmstat_local_mgh8_${SLURM_JOB_ID}.log
 ) &

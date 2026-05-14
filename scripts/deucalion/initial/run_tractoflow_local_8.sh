@@ -21,7 +21,7 @@ report_file="/projects/I20240002/nunolxm/output/local_8/report_local_8_${SLURM_J
 timeline_file="/projects/I20240002/nunolxm/output/local_8/timeline_local_8_${SLURM_JOB_ID}.html"
 trace_file="/projects/I20240002/nunolxm/output/local_8/trace_local_8_${SLURM_JOB_ID}.txt"
 
-vmstat 5 > /projects/I20240002/nunolxm/output/local_8/vmstat_local_8_${SLURM_JOB_ID}.log &
+vmstat -S M 5 > /projects/I20240002/nunolxm/output/local_8/vmstat_local_8_${SLURM_JOB_ID}.log &
 VMSTAT_PID=$!
 
 NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tractoflow/main.nf \

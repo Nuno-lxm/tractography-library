@@ -25,7 +25,7 @@ trace_file="$output_dir/trace_local_pent1_${SLURM_JOB_ID}.txt"
 
 config_file="$project_dir/tractography-library/config-files/deucalion/logger-deucalion.config"
 
-vmstat 5 > "$output_dir"/vmstat_local_pent1_${SLURM_JOB_ID}.log &
+vmstat -S M 5 > "$output_dir"/vmstat_local_pent1_${SLURM_JOB_ID}.log &
 VMSTAT_PID=$!
 
 NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tractoflow/main.nf \

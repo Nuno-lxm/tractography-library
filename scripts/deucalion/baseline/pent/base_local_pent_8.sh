@@ -26,7 +26,7 @@ trace_file="$output_dir/trace_local_pent8_${SLURM_JOB_ID}.txt"
 mkdir -p "$output_dir"
 
 (
-    vmstat 5 | while IFS= read -r line; do
+    vmstat -S M 5 | while IFS= read -r line; do
         printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line"
     done > "$output_dir"/vmstat_local_pent8_${SLURM_JOB_ID}.log
 ) &
