@@ -104,8 +104,7 @@ static int get_cmdline(char *out, size_t out_size) {
 
 __attribute__((constructor)) static void logger_init() {
     get_cmdline(cmdline, sizeof(cmdline));
-    log_msg("Initializing logger library...\n");
-    log_msg("%s\n", cmdline);
+    log_msg("Initializing logger library - %s\n", cmdline);
 }
 
 
