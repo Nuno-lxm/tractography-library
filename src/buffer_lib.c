@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <errno.h>
+#include <fnmatch.h>
 
 /*
 Configuration
@@ -43,12 +44,17 @@ static char **prefetch_target_list = prefetching_targets;
 static char **buffer_target_list = buffering_targets;
 static char **env_prefetch_targets = NULL;
 static char **env_buffer_targets = NULL;
+static char **env_file_targets = NULL;
+static char **file_target_list = NULL;
 
 /*
 Function Pointer Types for Original System Calls
 */
 
 typedef int (*original_open_t)(const char *path, int flags, ...);
+typedef int (*original_open64_t)(const char *path, int flags, ...);
+typedef int (*original_openat_t)(int dirfd, const char *path, int flags, ...);
+typedef int (*original_openat64_t)(int dirfd, const char *path, int flags, ...);
 typedef ssize_t (*original_write_t)(int fd, const void *buf, size_t count);
 typedef ssize_t (*original_pwrite_t)(int fd, const void *buf, size_t count, off_t offset);
 typedef ssize_t (*original_read_t)(int fd, void *buf, size_t count);
@@ -68,6 +74,9 @@ typedef struct {
     off_t logical_offset;
     off_t kernel_offset;
     int seekable;
+    int buffer_enabled;
+    int prefetch_enabled;
+    int filter_initialized;
 } fd_state_t;
 
 typedef struct { // Write Buffers
@@ -124,6 +133,9 @@ static int target_list_matches_process_name(char **target_list);
 static void init_config_from_env(void);
 static char **split_target_list(const char *value);
 static void free_target_list(char **list);
+static const char *path_basename(const char *path);
+static int list_matches_path(char **patterns, const char *path, const char *base);
+static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path);
 
 static char process_name[256];
 static int buffering_target = 0;
@@ -340,6 +352,53 @@ static void init_config_from_env(void) {
             log_msg("Failed to parse BUFFER_WRITE_TARGETS\n");
         }
     }
+
+    const char *file_env = getenv("BUFFER_FILE_TARGETS");
+    if (file_env && *file_env) {
+        char **list = split_target_list(file_env);
+        if (list) {
+            env_file_targets = list;
+            file_target_list = list;
+        } else {
+            log_msg("Failed to parse BUFFER_FILE_TARGETS\n");
+        }
+    }
+}
+
+static const char *path_basename(const char *path) {
+    if (!path) return NULL;
+    const char *base = strrchr(path, '/');
+    return base ? base + 1 : path;
+}
+
+static int list_matches_path(char **patterns, const char *path, const char *base) {
+    if (!patterns || !path || !base) return 0;
+    for (char **p = patterns; *p; p++) {
+        const char *target = strchr(*p, '/') ? path : base;
+        if (fnmatch(*p, target, 0) == 0) return 1;
+    }
+    return 0;
+}
+
+static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path) {
+    if (!state || state->filter_initialized) return;
+
+    state->buffer_enabled = buffering_target;
+    state->prefetch_enabled = prefetching_target;
+
+    if (file_target_list) {
+        if (path && *path) {
+            const char *base = path_basename(path);
+            int match = list_matches_path(file_target_list, path, base);
+            state->buffer_enabled = match ? buffering_target : 0;
+            state->prefetch_enabled = match ? prefetching_target : 0;
+        } else {
+            state->buffer_enabled = 0;
+            state->prefetch_enabled = 0;
+        }
+    }
+
+    state->filter_initialized = 1;
 }
 
 
@@ -404,6 +463,9 @@ static fd_state_t *allocate_fd_state(int fd) {
     state->logical_offset = 0;
     state->kernel_offset = 0;
     state->seekable = 1;
+    state->buffer_enabled = 0;
+    state->prefetch_enabled = 0;
+    state->filter_initialized = 0;
 
     int saved_errno = errno;
     off_t cur = syscall(SYS_lseek, fd, 0, SEEK_CUR);
@@ -423,8 +485,11 @@ static fd_state_t *allocate_fd_state(int fd) {
 static fd_state_t *get_or_create_fd_state(int fd) {
     if (fd < 2) return NULL;
     fd_state_t *state = get_fd_state(fd);
-    if (state) return state;
-    return allocate_fd_state(fd);
+    if (!state) state = allocate_fd_state(fd);
+    if (state && !state->filter_initialized) {
+        configure_fd_state_for_path(fd, state, NULL);
+    }
+    return state;
 }
 
 static void free_fd_state(int fd) {
@@ -676,7 +741,123 @@ int open(const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
-        (void)allocate_fd_state(fd);
+        fd_state_t *state = allocate_fd_state(fd);
+        configure_fd_state_for_path(fd, state, path);
+    }
+
+    return fd;
+}
+
+int open64(const char *path, int flags, ...) {
+    static original_open64_t original_open64 = NULL;
+    if (!original_open64) original_open64 = dlsym(RTLD_NEXT, "open64");
+
+    va_list args;
+    va_start(args, flags);
+    int fd;
+
+    if (original_open64) {
+        if (flags & O_CREAT) {
+            mode_t mode = va_arg(args, mode_t);
+            fd = original_open64(path, flags, mode);
+        } else {
+            fd = original_open64(path, flags);
+        }
+    } else {
+        static original_open_t original_open = NULL;
+        if (!original_open) original_open = dlsym(RTLD_NEXT, "open");
+        if (flags & O_CREAT) {
+            mode_t mode = va_arg(args, mode_t);
+            fd = original_open(path, flags, mode);
+        } else {
+            fd = original_open(path, flags);
+        }
+    }
+
+    va_end(args);
+
+    if (fd >= 0 && (buffering_target || prefetching_target)) {
+        fd_state_t *state = allocate_fd_state(fd);
+        configure_fd_state_for_path(fd, state, path);
+    }
+
+    return fd;
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    static original_openat_t original_openat = NULL;
+    if (!original_openat) original_openat = dlsym(RTLD_NEXT, "openat");
+
+    va_list args;
+    va_start(args, flags);
+    int fd;
+
+    if (original_openat) {
+        if (flags & O_CREAT) {
+            mode_t mode = va_arg(args, mode_t);
+            fd = original_openat(dirfd, path, flags, mode);
+        } else {
+            fd = original_openat(dirfd, path, flags);
+        }
+    } else {
+        if (flags & O_CREAT) {
+            mode_t mode = va_arg(args, mode_t);
+            fd = syscall(SYS_openat, dirfd, path, flags, mode);
+        } else {
+            fd = syscall(SYS_openat, dirfd, path, flags);
+        }
+    }
+
+    va_end(args);
+
+    if (fd >= 0 && (buffering_target || prefetching_target)) {
+        fd_state_t *state = allocate_fd_state(fd);
+        configure_fd_state_for_path(fd, state, path);
+    }
+
+    return fd;
+}
+
+int openat64(int dirfd, const char *path, int flags, ...) {
+    static original_openat64_t original_openat64 = NULL;
+    if (!original_openat64) original_openat64 = dlsym(RTLD_NEXT, "openat64");
+
+    va_list args;
+    va_start(args, flags);
+    int fd;
+
+    if (original_openat64) {
+        if (flags & O_CREAT) {
+            mode_t mode = va_arg(args, mode_t);
+            fd = original_openat64(dirfd, path, flags, mode);
+        } else {
+            fd = original_openat64(dirfd, path, flags);
+        }
+    } else {
+        static original_openat_t original_openat = NULL;
+        if (!original_openat) original_openat = dlsym(RTLD_NEXT, "openat");
+        if (original_openat) {
+            if (flags & O_CREAT) {
+                mode_t mode = va_arg(args, mode_t);
+                fd = original_openat(dirfd, path, flags, mode);
+            } else {
+                fd = original_openat(dirfd, path, flags);
+            }
+        } else {
+            if (flags & O_CREAT) {
+                mode_t mode = va_arg(args, mode_t);
+                fd = syscall(SYS_openat, dirfd, path, flags, mode);
+            } else {
+                fd = syscall(SYS_openat, dirfd, path, flags);
+            }
+        }
+    }
+
+    va_end(args);
+
+    if (fd >= 0 && (buffering_target || prefetching_target)) {
+        fd_state_t *state = allocate_fd_state(fd);
+        configure_fd_state_for_path(fd, state, path);
     }
 
     return fd;
@@ -727,7 +908,9 @@ ssize_t write(int fd, const void *buf, size_t count) {
         ? get_or_create_fd_state(fd)
         : NULL;
 
-    if (!buffering_target) {
+    int buffer_enabled = state && state->buffer_enabled;
+
+    if (!buffer_enabled) {
         ssize_t bytes = original_write(fd, buf, count);
         update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(state, bytes);
@@ -790,9 +973,11 @@ ssize_t read(int fd, void *buf, size_t count) {
     fd_state_t *state = (buffering_target || prefetching_target)
         ? get_or_create_fd_state(fd)
         : NULL;
+    int buffer_enabled = state && state->buffer_enabled;
+    int prefetch_enabled = state && state->prefetch_enabled;
 
     // Flush write buffer before reading to maintain read-after-write consistency
-    if (buffering_target) {
+    if (buffer_enabled) {
         wr_buffer_t *wb = get_write_buffer(fd);
         
         if (wb && wb->buffer_pos > 0) {
@@ -801,7 +986,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         }
     }
 
-    if (!prefetching_target) {
+    if (!prefetch_enabled) {
         ssize_t bytes = original_read(fd, buf, count);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(state, bytes);
@@ -1042,6 +1227,12 @@ static void cleanup_buffers() {
     if (env_buffer_targets) {
         free_target_list(env_buffer_targets);
         env_buffer_targets = NULL;
+    }
+
+    if (env_file_targets) {
+        free_target_list(env_file_targets);
+        env_file_targets = NULL;
+        file_target_list = NULL;
     }
 
     if (fd_states) {
