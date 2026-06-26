@@ -4,6 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
 #SBATCH --time=8:00:00
+#SBATCH --exclusive
 #SBATCH --partition=normal-x86
 #SBATCH --job-name=test_buf_pent3t_x86
 #SBATCH --output=/projects/I20240002/nunolxm/output/tests/buffer/pent3t_x86_%j/out_%j.out
@@ -22,7 +23,7 @@ report_file="$output_dir/report_test_buffer_pent3t_x86_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_test_buffer_pent3t_x86_${SLURM_JOB_ID}.html"
 trace_file="$output_dir/trace_test_buffer_pent3t_x86_${SLURM_JOB_ID}.txt"
 
-config_file="$project_dir/tractography-library/config-files/deucalion/buffer-deucalion.config"
+config_file="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
 
 mkdir -p "$output_dir"
 

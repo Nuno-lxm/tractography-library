@@ -4,6 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
 #SBATCH --time=8:00:00
+#SBATCH --exclusive
 #SBATCH --partition=normal-x86
 #SBATCH --job-name=test_base_pent3t_x86
 #SBATCH --output=/projects/I20240002/nunolxm/output/tests/baseline/pent3t_x86_%j/out_%j.out
@@ -21,6 +22,8 @@ work_dir="$project_dir/tractoflow_files/work/tests/baseline/work_${SLURM_JOB_ID}
 report_file="$output_dir/report_test_baseline_pent3t_x86_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_test_baseline_pent3t_x86_${SLURM_JOB_ID}.html"
 trace_file="$output_dir/trace_test_baseline_pent3t_x86_${SLURM_JOB_ID}.txt"
+
+config_file="$project_dir/tractography-library/config-files/deucalion/x86-base.config"
 
 mkdir -p "$output_dir"
 
@@ -50,4 +53,5 @@ NXF_VER=21.04.0 nextflow run /projects/I20240002/nunolxm/tractoflow_files/tracto
     -with-trace "$trace_file" \
     -w "$work_dir" \
     --input="$input_dir" \
-    --output_dir="$results_dir"
+    --output_dir="$results_dir" \
+    -c "$config_file"
