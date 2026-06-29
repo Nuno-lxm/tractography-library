@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=I20240002G
+#SBATCH --account=I20240002X
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
