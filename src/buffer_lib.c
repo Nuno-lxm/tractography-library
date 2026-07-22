@@ -21,13 +21,11 @@ Configuration
 #define ENABLE_WRITE_BUFFERING 1
 #define ENABLE_READ_PREFETCH 1
 
-#define WRITE_BUFFER_SIZE (64 * 1024) // 64KB
-#define INITIAL_WRITE_BUFFER_COUNT 64
+#define INITIAL_FD_TABLE_SIZE 64
 
-#define PREFETCH_BUFFER_SIZE (64 * 1024) // 64KB
-#define INITIAL_PREFETCH_BUFFER_COUNT 64
+#define WRITE_BUFFER_SIZE (64 * 1024)
 
-#define INITIAL_FD_STATE_COUNT 64
+#define PREFETCH_BUFFER_SIZE (64 * 1024)
 
 #define LOG_FILE "/mnt/buffer.log"
 
@@ -66,7 +64,7 @@ typedef int (*original_fdatasync_t)(int fd);
 typedef pid_t (*original_fork_t)(void);
 
 /*
-Define Buffer Arrays
+Define Buffer array
 */
 
 typedef struct {
@@ -79,42 +77,28 @@ typedef struct {
     int filter_initialized;
 } fd_state_t;
 
-typedef struct { // Write Buffers
-    int fd;
-    char *buffer;
-    size_t buffer_pos;
-    fd_state_t *state;
-} wr_buffer_t;
+typedef struct {
+    fd_state_t state;
+    char *wr_buf;
+    size_t wr_pos;
+    char *pf_buf;
+    size_t pf_pos;
+    size_t pf_data_size;
+} fd_entry_t;
 
-typedef struct { // Prefetch Buffers
-    int fd;
-    char *buffer;
-    size_t buffer_pos;
-    size_t data_size;
-    fd_state_t *state;
-} pf_buffer_t;
-
-static wr_buffer_t **wr_buffers = NULL;
-static size_t wr_buffer_cap = 0;
-
-static pf_buffer_t **pf_buffers = NULL;
-static size_t pf_buffer_cap = 0;
-
-static fd_state_t **fd_states = NULL;
-static size_t fd_state_cap = 0;
+static fd_entry_t *fd_table = NULL;
+static size_t fd_table_cap = 0;
 
 /*
 Statistics Variables
 */
 
-// Write Stats
 static unsigned long intercept_writes = 0;
 static unsigned long syscall_writes = 0;
 
 static size_t intercept_wr_bytes = 0;
 static size_t syscall_wr_bytes = 0;
 
-//Read Stats
 static unsigned long intercept_reads = 0;
 static unsigned long syscall_reads = 0;
 
@@ -145,14 +129,13 @@ __attribute__((constructor)) static void init_buffers();
 __attribute__((destructor)) static void cleanup_buffers();
 
 /*
-Intialization
+Initialization
 */
 
 static void init_buffers() {
     get_process_name(process_name, sizeof(process_name));
-
     init_config_from_env();
-    
+
     if (ENABLE_WRITE_BUFFERING && target_list_matches_process_name(buffer_target_list)) buffering_target = 1;
     if (ENABLE_READ_PREFETCH && target_list_matches_process_name(prefetch_target_list)) prefetching_target = 1;
 
@@ -162,30 +145,6 @@ static void init_buffers() {
         process_name[0] ? process_name : "unknown",
         buffering_target,
         prefetching_target);
-        
-    if (buffering_target) {
-        wr_buffer_cap = INITIAL_WRITE_BUFFER_COUNT;
-        wr_buffers = calloc(wr_buffer_cap, sizeof(wr_buffer_t*));
-        if (!wr_buffers) {
-            log_msg("Failed to allocate write buffer array\n");
-            wr_buffer_cap = 0;
-        }
-    } else {
-        wr_buffer_cap = 0;
-        wr_buffers = NULL;
-    }
-
-    if (prefetching_target) {
-        pf_buffer_cap = INITIAL_PREFETCH_BUFFER_COUNT;
-        pf_buffers = calloc(pf_buffer_cap, sizeof(pf_buffer_t*));
-        if (!pf_buffers) {
-            log_msg("Failed to allocate prefetch buffer array\n");
-            pf_buffer_cap = 0;
-        }
-    } else {
-        pf_buffer_cap = 0;
-        pf_buffers = NULL;
-    }
 }
 
 /*
@@ -278,9 +237,7 @@ static int is_target_delim(char c) {
 static char **split_target_list(const char *value) {
     if (!value) return NULL;
 
-    while (*value && is_target_delim(*value)) {
-        value++;
-    }
+    while (*value && is_target_delim(*value)) value++;
     if (*value == '\0') return NULL;
 
     size_t count = 0;
@@ -401,8 +358,9 @@ static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *p
     state->filter_initialized = 1;
 }
 
-
-// Statistics Functions
+/*
+Statistics Functions
+*/
 
 static inline void update_intercept_writes(size_t count) {
     intercept_writes++;
@@ -424,81 +382,94 @@ static inline void update_syscall_reads(size_t count) {
     syscall_rd_bytes += count;
 }
 
-// Offset Tracking
+/*
+FD Table Management
+*/
 
-static int ensure_fd_state_cap(int fd) {
+static int ensure_fd_table(int fd) {
     if (fd < 0) return 0;
 
-    if ((size_t)fd < fd_state_cap) return 1;
+    if ((size_t)fd < fd_table_cap) return 1;
 
-    size_t new_cap = fd_state_cap ? fd_state_cap : INITIAL_FD_STATE_COUNT;
+    size_t new_cap = fd_table_cap ? fd_table_cap : INITIAL_FD_TABLE_SIZE;
     while (new_cap <= (size_t)fd) new_cap *= 2;
 
-    fd_state_t **new_array = realloc(fd_states, new_cap * sizeof(*new_array));
-    if (!new_array) return 0;
+    fd_entry_t *new_table = realloc(fd_table, new_cap * sizeof(*new_table));
+    if (!new_table) return 0;
 
-    memset(new_array + fd_state_cap, 0, (new_cap - fd_state_cap) * sizeof(*new_array));
-    fd_states = new_array;
-    fd_state_cap = new_cap;
+    memset(new_table + fd_table_cap, 0, (new_cap - fd_table_cap) * sizeof(*new_table));
+    for (size_t i = fd_table_cap; i < new_cap; i++) {
+        new_table[i].state.fd = -1;
+    }
+
+    fd_table = new_table;
+    fd_table_cap = new_cap;
     return 1;
 }
 
-static fd_state_t *get_fd_state(int fd) {
+static fd_entry_t *get_fd_entry(int fd) {
     if (fd < 0) return NULL;
-    if ((size_t)fd >= fd_state_cap) return NULL;
-    return fd_states[fd];
+    if ((size_t)fd >= fd_table_cap) return NULL;
+    fd_entry_t *entry = &fd_table[fd];
+    if (entry->state.fd < 0) return NULL;
+    return entry;
 }
 
-static fd_state_t *allocate_fd_state(int fd) {
-    if (fd < 0) return NULL;
-    if (!ensure_fd_state_cap(fd)) return NULL;
+static fd_entry_t *get_or_create_fd_entry(int fd) {
+    if (fd < 2) return NULL;
+    if (!ensure_fd_table(fd)) return NULL;
 
-    fd_state_t *state = fd_states[fd];
-    if (state) return state;
+    fd_entry_t *entry = &fd_table[fd];
+    if (entry->state.fd >= 0) return entry;
 
-    state = calloc(1, sizeof(*state));
-    if (!state) return NULL;
-
-    state->fd = fd;
-    state->logical_offset = 0;
-    state->kernel_offset = 0;
-    state->seekable = 1;
-    state->buffer_enabled = 0;
-    state->prefetch_enabled = 0;
-    state->filter_initialized = 0;
+    entry->state.fd = fd;
+    entry->state.logical_offset = 0;
+    entry->state.kernel_offset = 0;
+    entry->state.seekable = 1;
+    entry->state.buffer_enabled = 0;
+    entry->state.prefetch_enabled = 0;
+    entry->state.filter_initialized = 0;
 
     int saved_errno = errno;
     off_t cur = syscall(SYS_lseek, fd, 0, SEEK_CUR);
     if (cur >= 0) {
-        state->logical_offset = cur;
-        state->kernel_offset = cur;
-        state->seekable = 1;
+        entry->state.logical_offset = cur;
+        entry->state.kernel_offset = cur;
+        entry->state.seekable = 1;
     } else if (errno == ESPIPE) {
-        state->seekable = 0;
+        entry->state.seekable = 0;
     }
     errno = saved_errno;
 
-    fd_states[fd] = state;
-    return state;
+    return entry;
 }
 
-static fd_state_t *get_or_create_fd_state(int fd) {
-    if (fd < 2) return NULL;
-    fd_state_t *state = get_fd_state(fd);
-    if (!state) state = allocate_fd_state(fd);
-    if (state && !state->filter_initialized) {
-        configure_fd_state_for_path(fd, state, NULL);
+static void free_fd_entry(int fd) {
+    if (fd < 0 || (size_t)fd >= fd_table_cap) return;
+    fd_entry_t *entry = &fd_table[fd];
+    if (entry->state.fd < 0) return;
+
+    free(entry->wr_buf);
+    free(entry->pf_buf);
+    memset(entry, 0, sizeof(*entry));
+    entry->state.fd = -1;
+}
+
+static void clear_all_fd_entries(void) {
+    for (size_t i = 0; i < fd_table_cap; i++) {
+        fd_entry_t *entry = &fd_table[i];
+        if (entry->state.fd >= 0) {
+            free(entry->wr_buf);
+            free(entry->pf_buf);
+            memset(entry, 0, sizeof(*entry));
+            entry->state.fd = -1;
+        }
     }
-    return state;
 }
 
-static void free_fd_state(int fd) {
-    if (fd < 0) return;
-    if ((size_t)fd >= fd_state_cap) return;
-    if (!fd_states[fd]) return;
-    free(fd_states[fd]);
-    fd_states[fd] = NULL;
-}
+/*
+Offset helpers
+*/
 
 static void advance_kernel_offset(fd_state_t *state, ssize_t delta) {
     if (!state || delta <= 0) return;
@@ -529,69 +500,21 @@ static int sync_kernel_to_logical(int fd, fd_state_t *state) {
     return 0;
 }
 
-// Write Buffer Management
+/*
+Write buffer management
+*/
 
-static int ensure_wr_cap(int fd) {
-    if (fd < 0) return 0;
-
-    if (fd < wr_buffer_cap) return 1; //fd is contained in array
-
-    size_t new_cap = wr_buffer_cap ? wr_buffer_cap : INITIAL_WRITE_BUFFER_COUNT; //Use pre-existing cap or use initial count
-    while (new_cap <= fd) new_cap *= 2;
-
-    wr_buffer_t **new_array = realloc(wr_buffers, new_cap * sizeof(*new_array)); //Reallocate the wr_buffers array with the size of new_cap
-    if (!new_array) return 0;
-
-    memset(new_array + wr_buffer_cap, 0, (new_cap - wr_buffer_cap) * sizeof(*new_array)); //Initialize new part of array as 0
-    wr_buffers = new_array;
-    wr_buffer_cap = new_cap;
-    return 1;
-}
-
-
-static wr_buffer_t* get_write_buffer(int fd) {
-    if (fd < 2) return NULL; // Don't buffer std out or err
-
-    if((size_t)fd >= wr_buffer_cap) return NULL;
-
-    return wr_buffers[fd];
-}
-
-
-static wr_buffer_t* allocate_write_buffer(int fd) {
-    if (fd < 2) return NULL;
-    if (!ensure_wr_cap(fd)) return NULL;
-
-    wr_buffer_t *wb = calloc(1, sizeof(wr_buffer_t));
-    if (!wb) return NULL;    
-    
-    wb->fd = fd;
-    wb->buffer = malloc(WRITE_BUFFER_SIZE);
-    if (!wb->buffer) {
-        free(wb);
-        return NULL;
-    }
-    wb->buffer_pos = 0;
-    wb->state = get_or_create_fd_state(fd);
-
-    wr_buffers[fd] = wb;
-    return wb;
-}
-
-
-static int flush_write_buffer(wr_buffer_t *wb) {
+static int flush_write_buffer(int fd, char *buf, size_t *pos, fd_state_t *state) {
     static original_write_t original_write = NULL;
     if (!original_write) original_write = dlsym(RTLD_NEXT, "write");
 
-    if (wb->buffer_pos == 0 || wb->fd < 0) return 0;
+    if (*pos == 0 || fd < 0) return 0;
 
-    fd_state_t *state = wb->state;
-
-    size_t remaining = wb->buffer_pos;
+    size_t remaining = *pos;
     size_t offset = 0;
 
     while (remaining > 0) {
-        ssize_t bytes = original_write(wb->fd, wb->buffer + offset, remaining);
+        ssize_t bytes = original_write(fd, buf + offset, remaining);
         if (bytes < 0) return -1;
         if (bytes == 0) {
             errno = EIO;
@@ -603,118 +526,33 @@ static int flush_write_buffer(wr_buffer_t *wb) {
         advance_kernel_offset(state, bytes);
     }
 
-    wb->buffer_pos = 0;
+    *pos = 0;
     return 0;
 }
 
-
-static void free_write_buffer(wr_buffer_t *wb) { 
-    wr_buffers[wb->fd] = NULL;
-    free(wb->buffer);
-    free(wb);
-}
-
-// Prefetch Buffer Management
-
-static int ensure_pf_cap(int fd) {
-    if (fd < 0) return 0;
-
-    if (fd < pf_buffer_cap) return 1; //fd is contained in array
-
-    size_t new_cap = pf_buffer_cap ? pf_buffer_cap : INITIAL_PREFETCH_BUFFER_COUNT;
-    while (new_cap <= fd) new_cap *= 2;
-
-    pf_buffer_t **new_array = realloc(pf_buffers, new_cap * sizeof(*new_array));
-    if (!new_array) return 0;
-
-    memset(new_array + pf_buffer_cap, 0, (new_cap - pf_buffer_cap) * sizeof(*new_array));
-    pf_buffers = new_array;
-    pf_buffer_cap = new_cap;
-    return 1;
-}
-
-
-static pf_buffer_t* get_prefetch_buffer(int fd) {
-    if (fd < 2) return NULL; // Don't buffer std in
-    if ((size_t)fd >= pf_buffer_cap) return NULL;
-
-    return pf_buffers[fd];
-}
-
-
-static pf_buffer_t* allocate_prefetch_buffer(int fd) {
-    if (fd < 2) return NULL;
-    if (!ensure_pf_cap(fd)) return NULL;
-
-    pf_buffer_t *pb = calloc(1, sizeof(pf_buffer_t));
-    if (!pb) return NULL;
-    
-    pb->fd = fd;
-    pb->buffer = malloc(PREFETCH_BUFFER_SIZE);
-    if (!pb->buffer) {
-        free(pb);
-        return NULL;
-    }
-    pb->buffer_pos = 0;
-    pb->state = get_or_create_fd_state(fd);
-
-    pf_buffers[fd] = pb;
-    return pb;
-}
-
-
-static void free_prefetch_buffer(pf_buffer_t *pb) {
-    pf_buffers[pb->fd] = NULL;
-    free(pb->buffer);
-    free(pb);
-}
-
-// General Buffer Management
+/*
+Flush both write and prefetch buffers for an fd
+*/
 
 static int flush_buffers(int fd) {
-    wr_buffer_t *wb = get_write_buffer(fd);
-    if (wb && wb->buffer_pos > 0 && flush_write_buffer(wb) < 0) {
-        return -1;
-    }
+    fd_entry_t *entry = get_fd_entry(fd);
+    if (!entry) return 0;
 
-    pf_buffer_t *pb = get_prefetch_buffer(fd);
-    if (pb) {
-        if (sync_kernel_to_logical(fd, pb->state) < 0) {
+    if (entry->state.buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
+        if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
             return -1;
         }
-        pb->buffer_pos = 0;
-        pb->data_size = 0;
+    }
+
+    if (entry->pf_buf) {
+        if (sync_kernel_to_logical(fd, &entry->state) < 0) {
+            return -1;
+        }
+        entry->pf_pos = 0;
+        entry->pf_data_size = 0;
     }
 
     return 0;
-}
-
-
-static void clear_write_buffers(void) { //Clear all write buffers for child after fork
-    for (int i = 0; i < wr_buffer_cap; i++) {
-        wr_buffer_t *wb = get_write_buffer(i);
-        if (wb) {
-            free_write_buffer(wb);
-        }
-    }
-}
-
-static void clear_prefetch_buffers(void) { // Clear all prefetch buffers for child after fork
-    for (int i = 0; i < pf_buffer_cap; i++) {
-        pf_buffer_t *pb = get_prefetch_buffer(i);
-        if (pb) {
-            free_prefetch_buffer(pb);
-        }
-    }
-}
-
-static void clear_fd_states(void) {
-    for (int i = 0; i < fd_state_cap; i++) {
-        if (fd_states[i]) {
-            free(fd_states[i]);
-            fd_states[i] = NULL;
-        }
-    }
 }
 
 /*
@@ -741,8 +579,8 @@ int open(const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
-        fd_state_t *state = allocate_fd_state(fd);
-        configure_fd_state_for_path(fd, state, path);
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
     }
 
     return fd;
@@ -777,8 +615,8 @@ int open64(const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
-        fd_state_t *state = allocate_fd_state(fd);
-        configure_fd_state_for_path(fd, state, path);
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
     }
 
     return fd;
@@ -811,8 +649,8 @@ int openat(int dirfd, const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
-        fd_state_t *state = allocate_fd_state(fd);
-        configure_fd_state_for_path(fd, state, path);
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
     }
 
     return fd;
@@ -856,13 +694,12 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
-        fd_state_t *state = allocate_fd_state(fd);
-        configure_fd_state_for_path(fd, state, path);
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
     }
 
     return fd;
 }
-
 
 int close(int fd) {
     static original_close_t original_close = NULL;
@@ -870,20 +707,15 @@ int close(int fd) {
 
     int flush_errno = 0;
 
-    wr_buffer_t *wb = get_write_buffer(fd);
-    if (wb) {
-        if (flush_write_buffer(wb) < 0) {
-            flush_errno = errno;
+    fd_entry_t *entry = get_fd_entry(fd);
+    if (entry) {
+        if (entry->state.buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
+            if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
+                flush_errno = errno;
+            }
         }
-        free_write_buffer(wb);
+        free_fd_entry(fd);
     }
-
-    pf_buffer_t *pb = get_prefetch_buffer(fd);
-    if (pb) {
-        free_prefetch_buffer(pb);
-    }
-
-    free_fd_state(fd);
 
     int result = original_close(fd);
     if (flush_errno) {
@@ -900,65 +732,65 @@ ssize_t write(int fd, const void *buf, size_t count) {
     static original_write_t original_write = NULL;
     if (!original_write) original_write = dlsym(RTLD_NEXT, "write");
 
-    if (fd < 2) { //checking this twice...
+    if (fd < 2) {
         return original_write(fd, buf, count);
     }
 
-    fd_state_t *state = (buffering_target || prefetching_target)
-        ? get_or_create_fd_state(fd)
+    fd_entry_t *entry = (buffering_target || prefetching_target)
+        ? get_or_create_fd_entry(fd)
         : NULL;
 
-    int buffer_enabled = state && state->buffer_enabled;
+    int buffer_enabled = entry && entry->state.buffer_enabled;
 
     if (!buffer_enabled) {
         ssize_t bytes = original_write(fd, buf, count);
         update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
-        advance_kernel_offset(state, bytes);
-        advance_logical_offset(state, bytes);
+        if (entry) {
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
+        }
         return bytes;
     }
 
     update_intercept_writes(count);
 
-    wr_buffer_t *wb = get_write_buffer(fd);
-
-    if (!wb) {
-        wb = allocate_write_buffer(fd);
-        if (!wb) {
+    if (!entry->wr_buf) {
+        entry->wr_buf = malloc(WRITE_BUFFER_SIZE);
+        if (!entry->wr_buf) {
             ssize_t bytes = original_write(fd, buf, count);
             update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
-            advance_kernel_offset(state, bytes);
-            advance_logical_offset(state, bytes);
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
             return bytes;
         }
+        entry->wr_pos = 0;
     }
 
-    if (wb->buffer_pos + count > WRITE_BUFFER_SIZE) {
-        if (flush_write_buffer(wb) < 0) {
+    if (entry->wr_pos + count > WRITE_BUFFER_SIZE) {
+        if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
             return -1;
         }
 
         if (count > WRITE_BUFFER_SIZE) {
             ssize_t bytes = original_write(fd, buf, count);
             update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
-            advance_kernel_offset(state, bytes);
-            advance_logical_offset(state, bytes);
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
             return bytes;
         }
     }
-    
-    memcpy(wb->buffer + wb->buffer_pos, buf, count);
-    wb->buffer_pos += count;
-    advance_logical_offset(state, (ssize_t)count);
-    
+
+    memcpy(entry->wr_buf + entry->wr_pos, buf, count);
+    entry->wr_pos += count;
+    advance_logical_offset(&entry->state, (ssize_t)count);
+
     return count;
 }
-
 
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
     static original_pwrite_t original_pwrite = NULL;
     if (!original_pwrite) original_pwrite = dlsym(RTLD_NEXT, "pwrite");
-    
+
     if (flush_buffers(fd) < 0) return -1;
 
     return original_pwrite(fd, buf, count, offset);
@@ -970,62 +802,59 @@ ssize_t read(int fd, void *buf, size_t count) {
     static original_read_t original_read = NULL;
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
-    fd_state_t *state = (buffering_target || prefetching_target)
-        ? get_or_create_fd_state(fd)
+    fd_entry_t *entry = (buffering_target || prefetching_target)
+        ? get_or_create_fd_entry(fd)
         : NULL;
-    int buffer_enabled = state && state->buffer_enabled;
-    int prefetch_enabled = state && state->prefetch_enabled;
 
-    // Flush write buffer before reading to maintain read-after-write consistency
-    if (buffer_enabled) {
-        wr_buffer_t *wb = get_write_buffer(fd);
-        
-        if (wb && wb->buffer_pos > 0) {
-            flush_on_reads++;
-            if (flush_write_buffer(wb) < 0) return -1;
+    int buffer_enabled = entry && entry->state.buffer_enabled;
+    int prefetch_enabled = entry && entry->state.prefetch_enabled;
+
+    if (buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
+        flush_on_reads++;
+        if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
+            return -1;
         }
     }
 
     if (!prefetch_enabled) {
         ssize_t bytes = original_read(fd, buf, count);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
-        advance_kernel_offset(state, bytes);
-        advance_logical_offset(state, bytes);
+        if (entry) {
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
+        }
         return bytes;
     }
 
-    pf_buffer_t *pb = get_prefetch_buffer(fd);
-
-    if (!pb) {
-        pb = allocate_prefetch_buffer(fd);
-        if (!pb) {
+    if (!entry->pf_buf) {
+        entry->pf_buf = malloc(PREFETCH_BUFFER_SIZE);
+        if (!entry->pf_buf) {
             ssize_t bytes = original_read(fd, buf, count);
             update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
             update_intercept_reads(bytes > 0 ? (size_t)bytes : 0);
-            advance_kernel_offset(state, bytes);
-            advance_logical_offset(state, bytes);
+            if (entry) {
+                advance_kernel_offset(&entry->state, bytes);
+                advance_logical_offset(&entry->state, bytes);
+            }
             return bytes;
         }
+        entry->pf_pos = 0;
+        entry->pf_data_size = 0;
     }
 
-    if (pb->buffer_pos > pb->data_size) {
-        pb->buffer_pos = pb->data_size;
+    if (entry->pf_pos > entry->pf_data_size) {
+        entry->pf_pos = entry->pf_data_size;
     }
 
-    if (pb->state) {
-        state = pb->state;
-    }
-
-    size_t available = pb->data_size > pb->buffer_pos
-        ? (pb->data_size - pb->buffer_pos)
+    size_t available = entry->pf_data_size > entry->pf_pos
+        ? (entry->pf_data_size - entry->pf_pos)
         : 0;
-    
-    // If requested data is in buffer
+
     if (count <= available) {
-        memcpy(buf, pb->buffer + pb->buffer_pos, count);
-        pb->buffer_pos += count;
+        memcpy(buf, entry->pf_buf + entry->pf_pos, count);
+        entry->pf_pos += count;
         update_intercept_reads(count);
-        advance_logical_offset(state, (ssize_t)count);
+        advance_logical_offset(&entry->state, (ssize_t)count);
         return count;
     }
 
@@ -1033,13 +862,12 @@ ssize_t read(int fd, void *buf, size_t count) {
     size_t total_read = 0;
     size_t needed = count;
 
-    // If some data is in buffer
-    if (pb->buffer_pos < pb->data_size) {
-        size_t remaining = pb->data_size - pb->buffer_pos;
-        
-        memcpy(out, pb->buffer + pb->buffer_pos, remaining);
+    if (entry->pf_pos < entry->pf_data_size) {
+        size_t remaining = entry->pf_data_size - entry->pf_pos;
 
-        pb->buffer_pos += remaining;
+        memcpy(out, entry->pf_buf + entry->pf_pos, remaining);
+
+        entry->pf_pos += remaining;
         total_read += remaining;
         out += remaining;
         needed -= remaining;
@@ -1048,35 +876,35 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (needed > PREFETCH_BUFFER_SIZE) {
         ssize_t bytes = original_read(fd, out, needed);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
-        advance_kernel_offset(state, bytes);
+        advance_kernel_offset(&entry->state, bytes);
 
         if (bytes <= 0) {
             update_intercept_reads(total_read);
-            advance_logical_offset(state, (ssize_t)total_read);
-            return total_read > 0 ? total_read : bytes; // Return what we have or the error
+            advance_logical_offset(&entry->state, (ssize_t)total_read);
+            return total_read > 0 ? total_read : bytes;
         }
 
         total_read += bytes;
     } else {
-        ssize_t bytes = original_read(fd, pb->buffer, PREFETCH_BUFFER_SIZE);
+        ssize_t bytes = original_read(fd, entry->pf_buf, PREFETCH_BUFFER_SIZE);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
-        advance_kernel_offset(state, bytes);
-    
+        advance_kernel_offset(&entry->state, bytes);
+
         if (bytes <= 0) {
             update_intercept_reads(total_read);
-            advance_logical_offset(state, (ssize_t)total_read);
+            advance_logical_offset(&entry->state, (ssize_t)total_read);
             return total_read > 0 ? total_read : bytes;
         }
-    
-        pb->data_size = (size_t)bytes;
+
+        entry->pf_data_size = (size_t)bytes;
         size_t to_copy = (size_t)bytes < needed ? (size_t)bytes : needed;
-        memcpy(out, pb->buffer, to_copy);
-        pb->buffer_pos = to_copy;
+        memcpy(out, entry->pf_buf, to_copy);
+        entry->pf_pos = to_copy;
         total_read += to_copy;
     }
 
     update_intercept_reads(total_read);
-    advance_logical_offset(state, (ssize_t)total_read);
+    advance_logical_offset(&entry->state, (ssize_t)total_read);
 
     return total_read;
 }
@@ -1089,43 +917,43 @@ off_t lseek(int fd, off_t offset, int whence) {
     static original_lseek_t original_lseek = NULL;
     if (!original_lseek) original_lseek = (original_lseek_t)dlsym(RTLD_NEXT, "lseek");
 
-    fd_state_t *state = (buffering_target || prefetching_target)
-        ? get_or_create_fd_state(fd)
-        : NULL;
-
     if (buffering_target || prefetching_target) {
         if (flush_buffers(fd) < 0) return -1;
     }
 
     off_t result = original_lseek(fd, offset, whence);
-    if (state && result >= 0) {
-        state->kernel_offset = result;
-        state->logical_offset = result;
+
+    if (result >= 0 && (buffering_target || prefetching_target)) {
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        if (entry) {
+            entry->state.kernel_offset = result;
+            entry->state.logical_offset = result;
+        }
     }
+
     return result;
 }
-
 
 off64_t lseek64(int fd, off64_t offset, int whence) {
     static original_lseek64_t original_lseek64 = NULL;
     if (!original_lseek64) original_lseek64 = (original_lseek64_t)dlsym(RTLD_NEXT, "lseek64");
-
-    fd_state_t *state = (buffering_target || prefetching_target)
-        ? get_or_create_fd_state(fd)
-        : NULL;
 
     if (buffering_target || prefetching_target) {
         if (flush_buffers(fd) < 0) return -1;
     }
 
     off64_t result = original_lseek64(fd, offset, whence);
-    if (state && result >= 0) {
-        state->kernel_offset = (off_t)result;
-        state->logical_offset = (off_t)result;
+
+    if (result >= 0 && (buffering_target || prefetching_target)) {
+        fd_entry_t *entry = get_or_create_fd_entry(fd);
+        if (entry) {
+            entry->state.kernel_offset = (off_t)result;
+            entry->state.logical_offset = (off_t)result;
+        }
     }
+
     return result;
 }
-
 
 int fsync(int fd) {
     static original_fsync_t original_fsync = NULL;
@@ -1134,10 +962,9 @@ int fsync(int fd) {
     if (buffering_target || prefetching_target) {
         if (flush_buffers(fd) < 0) return -1;
     }
-    
+
     return original_fsync(fd);
 }
-
 
 int fdatasync(int fd) {
     static original_fdatasync_t original_fdatasync = NULL;
@@ -1150,7 +977,6 @@ int fdatasync(int fd) {
     return original_fdatasync(fd);
 }
 
-
 pid_t fork(void) {
     static original_fork_t original_fork = NULL;
     if (!original_fork) original_fork = (original_fork_t)dlsym(RTLD_NEXT, "fork");
@@ -1158,9 +984,7 @@ pid_t fork(void) {
     pid_t pid = original_fork();
 
     if (pid == 0) {
-        if (buffering_target) clear_write_buffers();
-        if (prefetching_target) clear_prefetch_buffers();
-        clear_fd_states();
+        clear_all_fd_entries();
     }
 
     return pid;
@@ -1172,17 +996,13 @@ Clean up
 
 static void cleanup_buffers() {
     if (buffering_target) {
-        for (int i = 0; i < wr_buffer_cap; i++) {
-            if (wr_buffers[i]) {
-                (void)flush_write_buffer(wr_buffers[i]);
-                free_write_buffer(wr_buffers[i]);
+        for (size_t i = 0; i < fd_table_cap; i++) {
+            fd_entry_t *entry = &fd_table[i];
+            if (entry->state.fd >= 0 && entry->wr_buf) {
+                (void)flush_write_buffer(entry->state.fd, entry->wr_buf, &entry->wr_pos, &entry->state);
             }
         }
-        
-        free(wr_buffers);
-        wr_buffers = NULL;
-        wr_buffer_cap = 0;
-        
+
         double intercept_wr_avg = intercept_writes
             ? (double)intercept_wr_bytes / (double)intercept_writes
             : 0.0;
@@ -1196,16 +1016,6 @@ static void cleanup_buffers() {
     }
 
     if (prefetching_target) {
-        for (int i = 0; i < pf_buffer_cap; i++) {
-            if (pf_buffers[i]) {
-                free_prefetch_buffer(pf_buffers[i]);
-            }
-        }
-
-        free(pf_buffers);
-        pf_buffers = NULL;
-        pf_buffer_cap = 0;
-
         double intercept_rd_avg = intercept_reads
             ? (double)intercept_rd_bytes / (double)intercept_reads
             : 0.0;
@@ -1218,6 +1028,18 @@ static void cleanup_buffers() {
         log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
         log_msg("flush_on_reads=%lu\n", flush_on_reads);
     }
+
+    for (size_t i = 0; i < fd_table_cap; i++) {
+        fd_entry_t *entry = &fd_table[i];
+        if (entry->state.fd >= 0) {
+            free(entry->wr_buf);
+            free(entry->pf_buf);
+        }
+    }
+
+    free(fd_table);
+    fd_table = NULL;
+    fd_table_cap = 0;
 
     if (env_prefetch_targets) {
         free_target_list(env_prefetch_targets);
@@ -1235,17 +1057,6 @@ static void cleanup_buffers() {
         file_target_list = NULL;
     }
 
-    if (fd_states) {
-        for (int i = 0; i < fd_state_cap; i++) {
-            if (fd_states[i]) {
-                free(fd_states[i]);
-            }
-        }
-        free(fd_states);
-        fd_states = NULL;
-        fd_state_cap = 0;
-    }
-    
     if (log_fd >= 0) {
         syscall(SYS_close, log_fd);
         log_fd = -1;
