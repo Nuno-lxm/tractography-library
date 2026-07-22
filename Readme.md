@@ -11,54 +11,99 @@ The library is intended for high-throughput pipelines such as TractoFlow (Nextfl
 - **Write Buffering:** Aggregates small write operations into larger chunks to reduce system call overhead and improve disk throughput.
 - **Read Prefetching:** Reads larger blocks of data in advance to minimize read latency and improve sequential read performance.
 - **Targeted Interception:** Only activates for specified target commands (e.g., `dwidenoise`, `fslmaths`).
-- **Logging:** All I/O statistics and debug messages are written to `/mnt/buffer.log` for later analysis.
+- **File Filtering:** File glob patterns (`BUFFER_FILE_TARGETS`) restrict which files are intercepted per process.
+- **Logging:** All I/O statistics and debug messages are written to a configurable log file.
 
-## Logger
-The logger records:
-- Initialization and shutdown events
-- I/O statistics (number of intercepted and executed reads/writes, bytes transferred, average sizes)
-- Buffer flushes and errors
+## Components
 
-Log file location: `/mnt/buffer.log`
+| Component | Source | Build Target | Description |
+|---|---|---|---|
+| Buffer library | `src/buffer_lib.c` | `bin/buffer_lib.so` | Write buffering + read prefetching via LD_PRELOAD |
+| Logger | `src/logger.c` | `bin/logger.so` | Pass-through I/O call logger (no buffering) |
+| Unit test | `src/test.c` | `bin/test` | 12-scenario test for buffer library |
+| Log parser | `scripts/parse_buffer_log.py` | — | Parses `buffer.log` and summarizes stats |
 
+## Build
+
+```sh
+make
+```
+
+Produces `bin/buffer_lib.so`, `bin/logger.so`, `bin/test`.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `BUFFER_WRITE_TARGETS` | none | Comma-separated process names to enable write buffering for |
+| `BUFFER_PREFETCH_TARGETS` | none | Comma-separated process names to enable read prefetching for |
+| `BUFFER_FILE_TARGETS` | none | Comma-separated glob patterns (e.g. `*.nii.gz`) to filter which files are intercepted |
+| `BUFFER_LOG_FILE` | `/mnt/buffer.log` | Path to the log file |
+
+## Config Files
+
+Nextflow config files for different environments are in `config-files/`:
+
+| Config | Environment | Purpose |
+|---|---|---|
+| `deucalion/buffer-deucalion.config` | Deucalion GPU | Buffer library, LD_PRELOAD + Singularity bind |
+| `deucalion/logger-deucalion.config` | Deucalion GPU | Logger library, LD_PRELOAD + Singularity bind |
+| `deucalion/bet-prelim-test.config` | Deucalion GPU | Buffer library limited to bet/maskfilter/mrcalc |
+| `deucalion/x86-base.config` | Deucalion x86 | Baseline config (queue size, no LD_PRELOAD) |
+| `deucalion/x86-buffer.config` | Deucalion x86 | Buffer library with x86 tuning |
+| `cloud/buffer-cloud.config` | Cloud | Buffer library for cloud environment |
+| `cloud/logger-cloud.config` | Cloud | Logger library for cloud environment |
+
+## Test Scripts
+
+Slurm batch scripts for running TractoFlow with the library are in `scripts/tests/`:
+
+| Script | Dataset | Config | Arch |
+|---|---|---|---|
+| `test_buffer_mgh1.sh` | mgh1 (1 subject) | `buffer-deucalion.config` | GPU (a100-40) |
+| `test_buffer_penthera1.sh` | penthera1 (1 subject) | `buffer-deucalion.config` | GPU (a100-40) |
+| `test_buffer_penthera32.sh` | penthera32 (32 subjects) | `buffer-deucalion.config` | GPU (a100-40) |
+| `x86_full.sh` | Penthera_3T | `x86-base.config` | x86 (CPU-only) |
+| `x86_buf.sh` | Penthera_3T | `x86-buffer.config` | x86 (CPU-only) |
+| `x86_mgh_8.sh` | mgh8 (8 subjects) | `x86-base.config` | x86 (CPU-only) |
+| `x86_mgh_buf_8.sh` | mgh8 (8 subjects) | `x86-buffer.config` | x86 (CPU-only) |
+
+Baseline scripts (no LD_PRELOAD, for comparison) are in `scripts/baseline/` and `scripts/deucalion/baseline/`.
 
 ## Usage
 
-### 1. Manual Usage
+### 1. Manual
 
-- **Build the library:**
-   ```sh
-   make
-   ```
-- **Set the environment variable** before running your target tool or pipeline:
-   ```sh
-   export LD_PRELOAD=/path/to/libbuffer.so
-   <your_command>
-   ```
+```sh
+export LD_PRELOAD=/path/to/bin/buffer_lib.so
+export BUFFER_WRITE_TARGETS="dwidenoise,fslmaths,mrconvert"
+export BUFFER_FILE_TARGETS="*.nii,*.nii.gz"
+<your_command>
+```
 
-### 2. TractoFlow Integration (Recommended for HPC/Singularity)
+### 2. TractoFlow (HPC/Singularity)
 
-- Add the config files from `tractography-library/config-files/` to your TractoFlow command:
-   ```sh
-   nextflow run main.nf -c tractography-library/config-files/nextflow-buffer.config -c tractography-library/config-files/nextflow-logger.config
-   ```
-- Or include them in your `nextflow.config`.
+```sh
+nextflow run main.nf \
+    -with-singularity scilus_1.6.0.sif \
+    -c tractography-library/config-files/deucalion/buffer-deucalion.config \
+    --input /path/to/data \
+    --output_dir /path/to/results
+```
 
-The config files will automatically set `LD_PRELOAD` for the relevant processes inside the Singularity container.
+The config files set `LD_PRELOAD` and Singularity bind mounts automatically.
 
-## Nextflow/TractoFlow Integration
-- The `tractography-library/config-files/` directory contains example Nextflow configuration files for integrating the library with TractoFlow.
-- These configs set the `LD_PRELOAD` environment variable for relevant processes, ensuring the library is loaded only where beneficial.
-- Place the config files in your Nextflow pipeline directory and include them in your `nextflow.config` or via the `-c` option.
+## Internal Architecture
 
+The buffer library maintains a single `fd_entry_t` table indexed by file descriptor, with each entry containing:
+- `fd_state_t`: logical/kernel offset tracking, seekable flag, per-fd buffer/prefetch enable flags
+- `wr_buf`: lazily allocated 64KB write buffer (only if write buffering is active for this fd)
+- `pf_buf`: lazily allocated 64KB prefetch buffer (only if read prefetching is active)
 
-## Testing
-- To test the library, you can use the provided `src/test.c` file. To enable interception for the test program, add `test` to the target list in the source code (see `buffering_targets` and `prefetching_targets` arrays in `src/buffer_lib.c`).
+Buffers are allocated on demand and the table grows dynamically via `realloc`. On `fork()`, all entries are cleared in the child process to avoid state corruption.
 
 ## Notes
-- Only the specified target commands will have their I/O intercepted.
+- Only the specified target commands and file patterns will have their I/O intercepted.
 - The library is safe to use in multi-process environments and handles forked processes correctly.
-- For troubleshooting, consult `/mnt/buffer.log`.
-
----
-For more details, see the source code in `src/buffer_lib.c` and the example configs in `config-files/`.
+- For troubleshooting, consult the buffer log file (default `/mnt/buffer.log`).
+- Use `scripts/parse_buffer_log.py` to summarize logged statistics.
