@@ -749,18 +749,12 @@ ssize_t write(int fd, const void *buf, size_t count) {
     }
 
     fd_entry_t *entry = (buffering_target || prefetching_target)
-        ? get_or_create_fd_entry(fd)
+        ? get_fd_entry(fd)
         : NULL;
 
-    int buffer_enabled = entry && entry->state.buffer_enabled;
-
-    if (!buffer_enabled) {
+    if (!entry || !entry->state.buffer_enabled) {
         ssize_t bytes = original_write(fd, buf, count);
         update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
-        if (entry) {
-            advance_kernel_offset(&entry->state, bytes);
-            advance_logical_offset(&entry->state, bytes);
-        }
         return bytes;
     }
 
@@ -815,26 +809,19 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (!original_read) original_read = dlsym(RTLD_NEXT, "read");
 
     fd_entry_t *entry = (buffering_target || prefetching_target)
-        ? get_or_create_fd_entry(fd)
+        ? get_fd_entry(fd)
         : NULL;
 
-    int buffer_enabled = entry && entry->state.buffer_enabled;
-    int prefetch_enabled = entry && entry->state.prefetch_enabled;
-
-    if (buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
+    if (entry && entry->state.buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
         flush_on_reads++;
         if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
             return -1;
         }
     }
 
-    if (!prefetch_enabled) {
+    if (!entry || !entry->state.prefetch_enabled) {
         ssize_t bytes = original_read(fd, buf, count);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
-        if (entry) {
-            advance_kernel_offset(&entry->state, bytes);
-            advance_logical_offset(&entry->state, bytes);
-        }
         return bytes;
     }
 
