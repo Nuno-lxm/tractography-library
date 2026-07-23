@@ -430,17 +430,6 @@ static fd_entry_t *get_or_create_fd_entry(int fd) {
     entry->state.prefetch_enabled = 0;
     entry->state.filter_initialized = 0;
 
-    int saved_errno = errno;
-    off_t cur = syscall(SYS_lseek, fd, 0, SEEK_CUR);
-    if (cur >= 0) {
-        entry->state.logical_offset = cur;
-        entry->state.kernel_offset = cur;
-        entry->state.seekable = 1;
-    } else if (errno == ESPIPE) {
-        entry->state.seekable = 0;
-    }
-    errno = saved_errno;
-
     return entry;
 }
 
