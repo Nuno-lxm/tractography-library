@@ -581,6 +581,9 @@ int open(const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
+            free_fd_entry(fd);
+        }
     }
 
     return fd;
@@ -617,6 +620,9 @@ int open64(const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
+            free_fd_entry(fd);
+        }
     }
 
     return fd;
@@ -651,6 +657,9 @@ int openat(int dirfd, const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
+            free_fd_entry(fd);
+        }
     }
 
     return fd;
@@ -696,6 +705,9 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
+            free_fd_entry(fd);
+        }
     }
 
     return fd;
