@@ -6,16 +6,16 @@
 #SBATCH --time=8:00:00
 #SBATCH --exclusive
 #SBATCH --partition=normal-x86
-#SBATCH --job-name=base_ssd_pent3t
-#SBATCH --output=/projects/I20240002/nunolxm/output/baseline/ssd/pent3t_%j/out_%j.out
-#SBATCH --error=/projects/I20240002/nunolxm/output/baseline/ssd/pent3t_%j/err_%j.err
+#SBATCH --job-name=ssd_buf_pent3t
+#SBATCH --output=/projects/I20240002/nunolxm/output/tests/ssd/buffer/pent3t_%j/out_%j.out
+#SBATCH --error=/projects/I20240002/nunolxm/output/tests/ssd/buffer/pent3t_%j/err_%j.err
 
 module load Java/11.0.20
 
 project_dir="/projects/I20240002/nunolxm"
-output_dir="$project_dir/output/baseline/ssd/pent3t_${SLURM_JOB_ID}"
-results_dir="$project_dir/results/baseline/ssd/pent3t_${SLURM_JOB_ID}"
-config_file="$project_dir/tractography-library/config-files/deucalion/x86-base.config"
+output_dir="$project_dir/output/tests/ssd/buffer/pent3t_${SLURM_JOB_ID}"
+results_dir="$project_dir/results/tests/ssd/buffer/pent3t_${SLURM_JOB_ID}"
+config_file="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
 
 local_base="/tmp/ssd_pent3t_${SLURM_JOB_ID}"
 local_input="$local_base/input/Penthera_3T"
