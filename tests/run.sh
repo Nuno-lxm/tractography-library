@@ -45,11 +45,22 @@ run_buffered() {
     export BUFFER_FILE_TARGETS="*.nii.gz"
     export BUFFER_LOG_FILE="$BUF_LOG"
     for t in "${TESTS[@]}"; do
-        > "$BUF_LOG"
-        "$BENCH" "$t" >> "$TMP_BUF"
-        if [ -f "$BUF_LOG" ]; then
-            printf "[test %d]\n" "$t" >> "$TMP_STATS"
-            cat "$BUF_LOG" >> "$TMP_STATS"
+        if [ "$t" -eq 6 ]; then
+            for sz in 1 4 8 64; do
+                > "$BUF_LOG"
+                "$BENCH" 6 --sweep-size "$sz" >> "$TMP_BUF"
+                if [ -f "$BUF_LOG" ]; then
+                    printf "[sweep_%sKB]\n" "$sz" >> "$TMP_STATS"
+                    cat "$BUF_LOG" >> "$TMP_STATS"
+                fi
+            done
+        else
+            > "$BUF_LOG"
+            "$BENCH" "$t" >> "$TMP_BUF"
+            if [ -f "$BUF_LOG" ]; then
+                printf "[test %d]\n" "$t" >> "$TMP_STATS"
+                cat "$BUF_LOG" >> "$TMP_STATS"
+            fi
         fi
     done
 }
@@ -57,11 +68,12 @@ run_buffered() {
 calc() { awk "BEGIN { printf \"$1\", $2 }" 2>/dev/null || echo "N/A"; }
 
 get_ratio() {
-    local tn=$1
+    local header=$1
     local block
-    block=$(awk -v t="[test $tn]" '
-        $0 == t { found=1; next }
+    block=$(awk -v h="$header" '
+        index($0, h) == 1 { found=1; next }
         /^\[test/ && found { exit }
+        /^\[sweep/ && found { exit }
         found
     ' "$TMP_STATS" 2>/dev/null)
     [ -z "$block" ] && { echo "N/A"; return; }
@@ -74,7 +86,7 @@ get_ratio() {
 }
 
 NAMES=(dummy write_heavy read_heavy pipeline multi_file non_matching sweep)
-SUFFIXES=("sweep_1KB" "sweep_4KB" "sweep_8KB" "sweep_64KB" "sweep_256KB" "sweep_1MB")
+SUFFIXES=("sweep_1KB" "sweep_4KB" "sweep_8KB" "sweep_64KB")
 
 printf "\n--- Baseline ---\n"
 printf "# %-20s %10s %9s %9s %12s %12s\n" "test_name" "time_s" "data_mb" "mbps" "write_calls" "read_calls"
@@ -92,7 +104,6 @@ printf "%s\n" "-----------------------------------------------------------------
 
 for t in "${TESTS[@]}"; do
     name=${NAMES[$t]}
-    rr=$(get_ratio "$t")
 
     if [ "$t" -eq 6 ]; then
         for sfx in "${SUFFIXES[@]}"; do
@@ -102,6 +113,7 @@ for t in "${TESTS[@]}"; do
             bt=$(echo "$b" | awk '{print $3}')
             ut=$(echo "$u" | awk '{print $3}')
             sp=$(calc "%.2f" "$bt / $ut")
+            rr=$(get_ratio "[$sfx]")
             printf "%-20s %11.4f %11.4f %9s %11s\n" "$sfx" "$bt" "$ut" "$sp" "$rr"
         done
     else
@@ -111,6 +123,7 @@ for t in "${TESTS[@]}"; do
         bt=$(echo "$b" | awk '{print $3}')
         ut=$(echo "$u" | awk '{print $3}')
         sp=$(calc "%.2f" "$bt / $ut")
+        rr=$(get_ratio "[test $t]")
         printf "%-20s %11.4f %11.4f %9s %11s\n" "$name" "$bt" "$ut" "$sp" "$rr"
     fi
 done
@@ -121,6 +134,7 @@ if [ -s "$TMP_STATS" ]; then
     while IFS= read -r line; do
         case "$line" in
             \[test*) printf "\n%s\n" "$line" ;;
+            \[sweep*) printf "\n%s\n" "$line" ;;
             *intercepted*|*executed*|*flush_on_reads*) printf "  %s\n" "$line" ;;
         esac
     done < "$TMP_STATS"

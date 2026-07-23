@@ -235,9 +235,41 @@ static int bench_non_matching(size_t chunk, int count) {
 /*
  * B6: Size sweep — same total data at various chunk sizes
  */
-static int bench_size_sweep(size_t total_bytes) {
-    size_t sizes[] = {1024, 4096, 8192, 65536, 262144, 1048576};
+static int bench_size_sweep(size_t total_bytes, int only_kb) {
+    size_t sizes[] = {1024, 4096, 8192, 65536};
     int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+
+    if (only_kb > 0) {
+        size_t chunk = (size_t)only_kb * 1024;
+        int count = (int)(total_bytes / chunk);
+        if (count < 1) return 0;
+        char *buf = malloc(chunk);
+        if (!buf) { perror("malloc"); return -1; }
+        fill_buf(buf, chunk);
+        char path[256];
+        snprintf(path, sizeof(path), TEST_DIR "sweep_%zu.nii.gz", chunk);
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) { perror("open"); free(buf); return -1; }
+        double t0 = now();
+        for (int i = 0; i < count; i++) {
+            if (write(fd, buf, chunk) != (ssize_t)chunk) {
+                perror("write"); close(fd); free(buf); return -1;
+            }
+        }
+        double t1 = now();
+        close(fd);
+        unlink(path);
+        char label[64];
+        if (chunk < 1024)
+            snprintf(label, sizeof(label), "sweep_%zuB", chunk);
+        else if (chunk < 1024 * 1024)
+            snprintf(label, sizeof(label), "sweep_%zuKB", chunk / 1024);
+        else
+            snprintf(label, sizeof(label), "sweep_%zuMB", chunk / (1024 * 1024));
+        report(label, t1 - t0, (size_t)count * chunk, count, 0);
+        free(buf);
+        return 0;
+    }
 
     char path[256];
     for (int s = 0; s < num_sizes; s++) {
@@ -293,6 +325,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --read-mb   N    total MB for read tests (default 16)\n");
     fprintf(stderr, "  --chunk     N    chunk size in KB (default 8)\n");
     fprintf(stderr, "  --files     N    file count for multi_file (default 8)\n");
+    fprintf(stderr, "  --sweep-size N  single chunk size in KB for sweep (default: all)\n");
 }
 
 int main(int argc, char **argv) {
@@ -302,6 +335,7 @@ int main(int argc, char **argv) {
     int read_mb = 16;
     int chunk_kb = 8;
     int num_files = 8;
+    int sweep_size_kb = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--write-mb") == 0 && i + 1 < argc)
@@ -312,6 +346,8 @@ int main(int argc, char **argv) {
             chunk_kb = atoi(argv[++i]);
         else if (strcmp(argv[i], "--files") == 0 && i + 1 < argc)
             num_files = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--sweep-size") == 0 && i + 1 < argc)
+            sweep_size_kb = atoi(argv[++i]);
         else if (argv[i][0] >= '1' && argv[i][0] <= '6' && argv[i][1] == '\0') {
             test_all = 0;
             test_num = argv[i][0] - '0';
@@ -349,7 +385,7 @@ int main(int argc, char **argv) {
         if (bench_non_matching(chunk, count) < 0) return 1;
     }
     if (test_all || test_num == 6) {
-        if (bench_size_sweep((size_t)write_mb * 1024 * 1024) < 0) return 1;
+        if (bench_size_sweep((size_t)write_mb * 1024 * 1024, sweep_size_kb) < 0) return 1;
     }
 
     return 0;
