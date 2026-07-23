@@ -17,14 +17,25 @@ cleanup() {
     rm -rf "$TMP_BASE" "$TMP_BUF" "$TMP_STATS" "$TEST_DIR"
 }
 trap cleanup EXIT
+VERBOSE=false
 
 echo "==> Building..."
 make -s benchmark buffer_lib.so 2>/dev/null
 mkdir -p "$TEST_DIR"
 
+for arg in "$@"; do
+    [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ] && VERBOSE=true
+done
+
+ARGS=()
+for arg in "$@"; do
+    [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ] && continue
+    ARGS+=("$arg")
+done
+
 TESTS=()
-if [ $# -ge 1 ] && [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 6 ]; then
-    TESTS=("$1")
+if [ ${#ARGS[@]} -ge 1 ] && [ "${ARGS[0]}" -ge 1 ] 2>/dev/null && [ "${ARGS[0]}" -le 6 ]; then
+    TESTS=("${ARGS[0]}")
 else
     TESTS=(1 2 3 4 5 6)
 fi
@@ -129,15 +140,17 @@ for t in "${TESTS[@]}"; do
 done
 printf "%s\n" "================================================================================="
 
-printf "\n--- Buffer library stats ---\n"
-if [ -s "$TMP_STATS" ]; then
-    while IFS= read -r line; do
-        case "$line" in
-            \[test*) printf "\n%s\n" "$line" ;;
-            \[sweep*) printf "\n%s\n" "$line" ;;
-            *intercepted*|*executed*|*flush_on_reads*) printf "  %s\n" "$line" ;;
-        esac
-    done < "$TMP_STATS"
-else
-    printf "(no interception)\n"
+if [ "$VERBOSE" = true ]; then
+    printf "\n--- Buffer library stats ---\n"
+    if [ -s "$TMP_STATS" ]; then
+        while IFS= read -r line; do
+            case "$line" in
+                \[test*) printf "\n%s\n" "$line" ;;
+                \[sweep*) printf "\n%s\n" "$line" ;;
+                *intercepted*|*executed*|*flush_on_reads*) printf "  %s\n" "$line" ;;
+            esac
+        done < "$TMP_STATS"
+    else
+        printf "(no interception)\n"
+    fi
 fi
