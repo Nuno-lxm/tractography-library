@@ -12,13 +12,16 @@ buffer_lib.so: $(SRC_DIR)/buffer_lib.c | bin
 logger.so: $(SRC_DIR)/logger.c | bin
 	gcc -shared -fPIC -Wall -o $(BIN_DIR)/logger.so $(SRC_DIR)/logger.c -ldl
 
-test: $(SRC_DIR)/test.c | bin
-	gcc -Wall -o $(BIN_DIR)/test $(SRC_DIR)/test.c
+test: tests/test.c | bin
+	gcc -Wall -o $(BIN_DIR)/test tests/test.c
 
 benchmark: tests/benchmark.c | bin
 	gcc -Wall -O2 -o $(BIN_DIR)/benchmark tests/benchmark.c
 
-run: benchmark
+run: test
+	./bin/test
+
+bench: benchmark
 	./tests/run.sh
 
 clean:
