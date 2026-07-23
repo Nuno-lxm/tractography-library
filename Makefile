@@ -1,7 +1,7 @@
 BIN_DIR = bin
 SRC_DIR = src
 
-all: buffer_lib.so logger.so test
+all: buffer_lib.so logger.so test benchmark
 
 bin:
 	mkdir -p $(BIN_DIR)
@@ -14,6 +14,12 @@ logger.so: $(SRC_DIR)/logger.c | bin
 
 test: $(SRC_DIR)/test.c | bin
 	gcc -Wall -o $(BIN_DIR)/test $(SRC_DIR)/test.c
-	
+
+benchmark: tests/benchmark.c | bin
+	gcc -Wall -O2 -o $(BIN_DIR)/benchmark tests/benchmark.c
+
+run: benchmark
+	./tests/run.sh
+
 clean:
-	rm -rf $(BIN_DIR)
+	rm -rf $(BIN_DIR) tests/output
