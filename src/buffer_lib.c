@@ -23,9 +23,9 @@ Configuration
 
 #define INITIAL_FD_TABLE_SIZE 64
 
-#define WRITE_BUFFER_SIZE (512 * 1024)
+#define WRITE_BUFFER_SIZE (256 * 1024)
 
-#define PREFETCH_BUFFER_SIZE (512 * 1024)
+#define PREFETCH_BUFFER_SIZE (256 * 1024)
 
 #define LOG_FILE "/mnt/buffer.log"
 
