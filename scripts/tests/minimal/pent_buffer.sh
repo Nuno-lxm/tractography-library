@@ -23,7 +23,7 @@ report_file="$output_dir/report_test_minimal_pent_buffer_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_test_minimal_pent_buffer_${SLURM_JOB_ID}.html"
 trace_file="$output_dir/trace_test_minimal_pent_buffer_${SLURM_JOB_ID}.txt"
 
-config_file="$project_dir/tractography-library/config-files/deucalion/x86-base.config"
+config_file="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
 
 mkdir -p "$output_dir"
 
