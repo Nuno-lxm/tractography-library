@@ -6,6 +6,7 @@
 #SBATCH --time=8:00:00
 #SBATCH --exclusive
 #SBATCH --partition=normal-x86
+#SBATCH --job-name=minimal
 
 # Unified minimal test script for tractoflow pipeline.
 # Replaces: mgh.sh, mgh_buffer.sh, mgh8_buffer.sh, minimal_base.sh,

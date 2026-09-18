@@ -6,6 +6,7 @@
 #SBATCH --time=8:00:00
 #SBATCH --exclusive
 #SBATCH --partition=normal-x86
+#SBATCH --job-name=x86_test
 
 # Unified x86 full/buffer test script.
 # Replaces: x86_full.sh, x86_buf.sh, x86_mgh_8.sh, x86_mgh_buf_8.sh,
