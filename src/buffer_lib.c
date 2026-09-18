@@ -18,16 +18,14 @@
 Configuration
 */
 
-#define ENABLE_WRITE_BUFFERING 1
-#define ENABLE_READ_PREFETCH 1
-
 #define INITIAL_FD_TABLE_SIZE 64
 
-#define WRITE_BUFFER_SIZE (256 * 1024)
-
-#define PREFETCH_BUFFER_SIZE (256 * 1024)
-
 #define LOG_FILE "/mnt/buffer.log"
+
+#define DEFAULT_ENABLE_WRITE_BUFFERING 1
+#define DEFAULT_ENABLE_READ_PREFETCH 1
+#define DEFAULT_WRITE_BUFFER_SIZE (256 * 1024)
+#define DEFAULT_PREFETCH_BUFFER_SIZE (256 * 1024)
 
 static char *prefetching_targets[] = {
     NULL
@@ -44,6 +42,11 @@ static char **env_prefetch_targets = NULL;
 static char **env_buffer_targets = NULL;
 static char **env_file_targets = NULL;
 static char **file_target_list = NULL;
+
+static int enable_write_buffering = DEFAULT_ENABLE_WRITE_BUFFERING;
+static int enable_read_prefetch = DEFAULT_ENABLE_READ_PREFETCH;
+static size_t write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
+static size_t prefetch_buffer_size = DEFAULT_PREFETCH_BUFFER_SIZE;
 
 /*
 Function Pointer Types for Original System Calls
@@ -136,8 +139,8 @@ static void init_buffers() {
     get_process_name(process_name, sizeof(process_name));
     init_config_from_env();
 
-    if (ENABLE_WRITE_BUFFERING && target_list_matches_process_name(buffer_target_list)) buffering_target = 1;
-    if (ENABLE_READ_PREFETCH && target_list_matches_process_name(prefetch_target_list)) prefetching_target = 1;
+    if (enable_write_buffering && target_list_matches_process_name(buffer_target_list)) buffering_target = 1;
+    if (enable_read_prefetch && target_list_matches_process_name(prefetch_target_list)) prefetching_target = 1;
 
     if (!buffering_target && !prefetching_target) return;
 
@@ -319,6 +322,28 @@ static void init_config_from_env(void) {
         } else {
             log_msg("Failed to parse BUFFER_FILE_TARGETS\n");
         }
+    }
+
+    const char *wb_env = getenv("BUFFER_WRITE_ENABLED");
+    if (wb_env && *wb_env) {
+        enable_write_buffering = atoi(wb_env);
+    }
+
+    const char *rp_env = getenv("BUFFER_PREFETCH_ENABLED");
+    if (rp_env && *rp_env) {
+        enable_read_prefetch = atoi(rp_env);
+    }
+
+    const char *ws_env = getenv("BUFFER_WRITE_SIZE");
+    if (ws_env && *ws_env) {
+        unsigned long val = strtoul(ws_env, NULL, 10);
+        if (val > 0) write_buffer_size = (size_t)val;
+    }
+
+    const char *ps_env = getenv("BUFFER_PREFETCH_SIZE");
+    if (ps_env && *ps_env) {
+        unsigned long val = strtoul(ps_env, NULL, 10);
+        if (val > 0) prefetch_buffer_size = (size_t)val;
     }
 }
 
@@ -750,7 +775,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
     update_intercept_writes(count);
 
     if (!entry->wr_buf) {
-        entry->wr_buf = malloc(WRITE_BUFFER_SIZE);
+        entry->wr_buf = malloc(write_buffer_size);
         if (!entry->wr_buf) {
             ssize_t bytes = original_write(fd, buf, count);
             update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
@@ -761,12 +786,12 @@ ssize_t write(int fd, const void *buf, size_t count) {
         entry->wr_pos = 0;
     }
 
-    if (entry->wr_pos + count > WRITE_BUFFER_SIZE) {
+    if (entry->wr_pos + count > write_buffer_size) {
         if (flush_write_buffer(fd, entry->wr_buf, &entry->wr_pos, &entry->state) < 0) {
             return -1;
         }
 
-        if (count > WRITE_BUFFER_SIZE) {
+        if (count > write_buffer_size) {
             ssize_t bytes = original_write(fd, buf, count);
             update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
             advance_kernel_offset(&entry->state, bytes);
@@ -815,7 +840,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 
     if (!entry->pf_buf) {
-        entry->pf_buf = malloc(PREFETCH_BUFFER_SIZE);
+        entry->pf_buf = malloc(prefetch_buffer_size);
         if (!entry->pf_buf) {
             ssize_t bytes = original_read(fd, buf, count);
             update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
@@ -861,7 +886,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         needed -= remaining;
     }
 
-    if (needed > PREFETCH_BUFFER_SIZE) {
+    if (needed > prefetch_buffer_size) {
         ssize_t bytes = original_read(fd, out, needed);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(&entry->state, bytes);
@@ -874,7 +899,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 
         total_read += bytes;
     } else {
-        ssize_t bytes = original_read(fd, entry->pf_buf, PREFETCH_BUFFER_SIZE);
+        ssize_t bytes = original_read(fd, entry->pf_buf, prefetch_buffer_size);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(&entry->state, bytes);
 
