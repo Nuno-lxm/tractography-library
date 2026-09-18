@@ -75,6 +75,8 @@ module load Java/11.0.20
 
 mkdir -p "$output_dir"
 
+exec > "$output_dir/out_${SLURM_JOB_ID}.out" 2> "$output_dir/err_${SLURM_JOB_ID}.err"
+
 cleanup() {
     if [[ -n "${VMSTAT_PID:-}" ]]; then
         kill "$VMSTAT_PID" 2>/dev/null || true

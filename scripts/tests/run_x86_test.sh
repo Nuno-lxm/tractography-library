@@ -117,6 +117,8 @@ if [[ "$SSD" == true ]]; then
     echo "[$(date)] Copy complete."
 fi
 
+exec > "$output_dir/out_${SLURM_JOB_ID}.out" 2> "$output_dir/err_${SLURM_JOB_ID}.err"
+
 start_ts=$(date +%s)
 
 cleanup() {
