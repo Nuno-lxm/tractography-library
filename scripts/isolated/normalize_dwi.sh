@@ -62,14 +62,17 @@ project_dir="/projects/I20240002/nunolxm"
 pipeline_file="$project_dir/tractography-library/src/normalize_only.nf"
 input_dir="$project_dir/data/normalize_dwi/$DATASET"
 
+baseline_config="$project_dir/tractoflow_files/tractoflow/nextflow.config"
+buffer_config="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
+
+config_args=(-c "$baseline_config")
+
 if [[ "$BUFFER" == true ]]; then
-    config_file="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
+    config_args+=(-c "$buffer_config")
     test_name="${DATASET}_normalize_buffer_x86"
 else
-    config_file="$project_dir/tractoflow_files/tractoflow/nextflow.config"
     test_name="${DATASET}_normalize_x86"
 fi
-
 output_dir="$project_dir/output/tests/isolated/${test_name}_${SLURM_JOB_ID}"
 results_dir="$project_dir/results/tests/isolated/${test_name}_${SLURM_JOB_ID}"
 work_dir="$project_dir/tractoflow_files/work/tests/isolated/${test_name}_work_${SLURM_JOB_ID}"
@@ -122,7 +125,7 @@ echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "Dataset: $DATASET ($input_dir)"
 echo "Subjects: $subject_count"
 echo "Buffer: $BUFFER"
-echo "Config: $config_file"
+echo "Config: ${config_args[*]}"
 echo "Workflow: $pipeline_file"
 
 # ── Run isolated Normalize_DWI ──────────────────────────────────────────────
@@ -135,4 +138,4 @@ NXF_VER=21.04.0 nextflow run "$pipeline_file" \
     -w "$work_dir" \
     --input="$input_dir" \
     --output="$results_dir" \
-    -c "$config_file"
+    "${config_args[@]}" \
