@@ -84,6 +84,7 @@ typedef struct {
     int buffer_enabled;
     int prefetch_enabled;
     int filter_initialized;
+    int append;
 } fd_state_t;
 
 typedef struct {
@@ -392,6 +393,7 @@ static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *p
     if (accmode == O_RDONLY) state->buffer_enabled = 0;
     if (accmode == O_WRONLY) state->prefetch_enabled = 0;
 
+    state->append = (flags & O_APPEND) != 0;
     state->filter_initialized = 1;
 }
 
@@ -466,6 +468,7 @@ static fd_entry_t *get_or_create_fd_entry(int fd) {
     entry->state.buffer_enabled = 0;
     entry->state.prefetch_enabled = 0;
     entry->state.filter_initialized = 0;
+    entry->state.append = 0;
 
     return entry;
 }
@@ -938,6 +941,10 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 
     if (needed > prefetch_buffer_size) {
+        // The read bypasses the buffer, so its contents no longer surround the offset
+        entry->pf_pos = 0;
+        entry->pf_data_size = 0;
+
         ssize_t bytes = original_read(fd, out, needed);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
         advance_kernel_offset(&entry->state, bytes);
@@ -977,11 +984,48 @@ ssize_t read(int fd, void *buf, size_t count) {
 File management operations
 */
 
+/*
+Answer a seek from the tracked offsets when possible: tell() and seeks that
+stay inside the prefetch window keep the buffers and skip the syscall.
+Returns 1 and sets *result if handled.
+*/
+
+static int try_fast_seek(int fd, off_t offset, int whence, off_t *result) {
+    fd_entry_t *entry = get_fd_entry(fd);
+    if (!entry || !entry->state.seekable || entry->state.append) return 0;
+    if (!entry->state.buffer_enabled && !entry->state.prefetch_enabled) return 0;
+
+    off_t target;
+    if (whence == SEEK_CUR) target = entry->state.logical_offset + offset;
+    else if (whence == SEEK_SET) target = offset;
+    else return 0;
+
+    if (target == entry->state.logical_offset) {
+        *result = target;
+        return 1;
+    }
+
+    if (entry->pf_buf && entry->pf_data_size > 0) {
+        off_t window_start = entry->state.logical_offset - (off_t)entry->pf_pos;
+        off_t window_end = window_start + (off_t)entry->pf_data_size;
+        if (target >= window_start && target <= window_end) {
+            entry->pf_pos = (size_t)(target - window_start);
+            entry->state.logical_offset = target;
+            *result = target;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 off_t lseek(int fd, off_t offset, int whence) {
     static original_lseek_t original_lseek = NULL;
     if (!original_lseek) original_lseek = (original_lseek_t)dlsym(RTLD_NEXT, "lseek");
 
     if (buffering_target || prefetching_target) {
+        off_t fast;
+        if (try_fast_seek(fd, offset, whence, &fast)) return fast;
         if (flush_buffers(fd) < 0) return -1;
     }
 
@@ -1003,6 +1047,8 @@ off64_t lseek64(int fd, off64_t offset, int whence) {
     if (!original_lseek64) original_lseek64 = (original_lseek64_t)dlsym(RTLD_NEXT, "lseek64");
 
     if (buffering_target || prefetching_target) {
+        off_t fast;
+        if (try_fast_seek(fd, (off_t)offset, whence, &fast)) return (off64_t)fast;
         if (flush_buffers(fd) < 0) return -1;
     }
 
