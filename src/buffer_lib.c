@@ -68,6 +68,8 @@ typedef off_t (*original_lseek_t)(int fd, off_t offset, int whence);
 typedef off64_t (*original_lseek64_t)(int fd, off64_t offset, int whence);
 typedef int (*original_fsync_t)(int fd);
 typedef int (*original_fdatasync_t)(int fd);
+typedef int (*original_dup2_t)(int oldfd, int newfd);
+typedef int (*original_dup3_t)(int oldfd, int newfd, int flags);
 typedef pid_t (*original_fork_t)(void);
 
 /*
@@ -474,6 +476,21 @@ static void free_fd_entry(int fd) {
     entry->state.fd = -1;
 }
 
+/*
+An fd returned by open() can still have an entry if the previous file with
+that number was closed without going through close() (e.g. fclose after
+fdopen). Drop it so the new file does not inherit its buffers or offsets.
+*/
+static void drop_stale_fd_entry(int fd) {
+    fd_entry_t *entry = get_fd_entry(fd);
+    if (!entry) return;
+
+    if (entry->wr_pos > 0) {
+        log_msg("Dropping stale entry for fd %d with %zu unflushed bytes\n", fd, entry->wr_pos);
+    }
+    free_fd_entry(fd);
+}
+
 static void clear_all_fd_entries(void) {
     for (size_t i = 0; i < fd_table_cap; i++) {
         fd_entry_t *entry = &fd_table[i];
@@ -598,6 +615,7 @@ int open(const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
+        drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
@@ -637,6 +655,7 @@ int open64(const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
+        drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
@@ -674,6 +693,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
+        drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
@@ -722,6 +742,7 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     va_end(args);
 
     if (fd >= 0 && (buffering_target || prefetching_target)) {
+        drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
         configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
@@ -993,6 +1014,43 @@ int fdatasync(int fd) {
     }
 
     return original_fdatasync(fd);
+}
+
+/*
+dup2/dup3 silently close newfd, so flush and drop its entry like close()
+does. oldfd is flushed so writes through the duplicate land after its
+buffered data; the duplicate itself is not tracked.
+*/
+static void prepare_dup(int oldfd, int newfd) {
+    if (!(buffering_target || prefetching_target)) return;
+
+    (void)flush_buffers(oldfd);
+
+    fd_entry_t *entry = get_fd_entry(newfd);
+    if (entry) {
+        if (entry->state.buffer_enabled && entry->wr_buf && entry->wr_pos > 0) {
+            (void)flush_write_buffer(newfd, entry->wr_buf, &entry->wr_pos, &entry->state);
+        }
+        free_fd_entry(newfd);
+    }
+}
+
+int dup2(int oldfd, int newfd) {
+    static original_dup2_t original_dup2 = NULL;
+    if (!original_dup2) original_dup2 = dlsym(RTLD_NEXT, "dup2");
+
+    if (oldfd != newfd) prepare_dup(oldfd, newfd);
+
+    return original_dup2(oldfd, newfd);
+}
+
+int dup3(int oldfd, int newfd, int flags) {
+    static original_dup3_t original_dup3 = NULL;
+    if (!original_dup3) original_dup3 = dlsym(RTLD_NEXT, "dup3");
+
+    if (oldfd != newfd) prepare_dup(oldfd, newfd);
+
+    return original_dup3(oldfd, newfd, flags);
 }
 
 pid_t fork(void) {
