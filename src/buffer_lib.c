@@ -890,6 +890,10 @@ ssize_t read(int fd, void *buf, size_t count) {
     if (!entry || !entry->state.prefetch_enabled) {
         ssize_t bytes = original_read(fd, buf, count);
         update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
+        if (entry) {
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
+        }
         return bytes;
     }
 
