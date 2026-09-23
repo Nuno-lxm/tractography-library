@@ -73,9 +73,9 @@ if [[ "$BUFFER" == true ]]; then
 else
     test_name="${DATASET}_normalize_x86"
 fi
-output_dir="$project_dir/output/tests/isolated/${test_name}_${SLURM_JOB_ID}"
-results_dir="$project_dir/results/tests/isolated/${test_name}_${SLURM_JOB_ID}"
-work_dir="$project_dir/tractoflow_files/work/tests/isolated/${test_name}_work_${SLURM_JOB_ID}"
+output_dir="$project_dir/output/tests/isolated/normalize/${test_name}_${SLURM_JOB_ID}"
+results_dir="$project_dir/results/tests/isolated/normalize/${test_name}_${SLURM_JOB_ID}"
+work_dir="$project_dir/tractoflow_files/work/tests/isolated/normalize/${test_name}_work_${SLURM_JOB_ID}"
 
 report_file="$output_dir/report_${test_name}_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_${test_name}_${SLURM_JOB_ID}.html"
