@@ -115,6 +115,12 @@ static unsigned long syscall_reads = 0;
 static size_t intercept_rd_bytes = 0;
 static size_t syscall_rd_bytes = 0;
 
+// Calls on fds the library does not buffer; kept out of the counts above
+static unsigned long passthrough_writes = 0;
+static size_t passthrough_wr_bytes = 0;
+static unsigned long passthrough_reads = 0;
+static size_t passthrough_rd_bytes = 0;
+
 static unsigned long flush_on_reads = 0;
 
 /*
@@ -419,6 +425,16 @@ static inline void update_intercept_reads(size_t count) {
 static inline void update_syscall_reads(size_t count) {
     syscall_reads++;
     syscall_rd_bytes += count;
+}
+
+static inline void update_passthrough_writes(size_t count) {
+    passthrough_writes++;
+    passthrough_wr_bytes += count;
+}
+
+static inline void update_passthrough_reads(size_t count) {
+    passthrough_reads++;
+    passthrough_rd_bytes += count;
 }
 
 /*
@@ -818,7 +834,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
     if (!entry || !entry->state.buffer_enabled) {
         ssize_t bytes = original_write(fd, buf, count);
-        update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
+        update_passthrough_writes(bytes > 0 ? (size_t)bytes : 0);
         if (entry) {
             advance_kernel_offset(&entry->state, bytes);
             advance_logical_offset(&entry->state, bytes);
@@ -889,7 +905,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     if (!entry || !entry->state.prefetch_enabled) {
         ssize_t bytes = original_read(fd, buf, count);
-        update_syscall_reads(bytes > 0 ? (size_t)bytes : 0);
+        update_passthrough_reads(bytes > 0 ? (size_t)bytes : 0);
         if (entry) {
             advance_kernel_offset(&entry->state, bytes);
             advance_logical_offset(&entry->state, bytes);
@@ -1164,6 +1180,7 @@ static void cleanup_buffers() {
 
         log_msg("write_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_writes, intercept_wr_bytes, intercept_wr_avg);
         log_msg("write_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_writes, syscall_wr_bytes, syscall_wr_avg);
+        log_msg("write_stats passthrough calls=%lu bytes=%zu\n", passthrough_writes, passthrough_wr_bytes);
     }
 
     if (prefetching_target) {
@@ -1177,6 +1194,7 @@ static void cleanup_buffers() {
 
         log_msg("read_stats intercepted calls=%lu bytes=%zu avg=%.2f\n", intercept_reads, intercept_rd_bytes, intercept_rd_avg);
         log_msg("read_stats executed calls=%lu bytes=%zu avg=%.2f\n", syscall_reads, syscall_rd_bytes, syscall_rd_avg);
+        log_msg("read_stats passthrough calls=%lu bytes=%zu\n", passthrough_reads, passthrough_rd_bytes);
         log_msg("flush_on_reads=%lu\n", flush_on_reads);
     }
 
