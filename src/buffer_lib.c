@@ -128,7 +128,7 @@ static char **split_target_list(const char *value);
 static void free_target_list(char **list);
 static const char *path_basename(const char *path);
 static int list_matches_path(char **patterns, const char *path, const char *base);
-static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path);
+static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path, int flags);
 
 static char process_name[256];
 static int buffering_target = 0;
@@ -369,7 +369,7 @@ static int list_matches_path(char **patterns, const char *path, const char *base
     return 0;
 }
 
-static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path) {
+static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path, int flags) {
     if (!state || state->filter_initialized) return;
 
     state->buffer_enabled = buffering_target;
@@ -386,6 +386,11 @@ static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *p
             state->prefetch_enabled = 0;
         }
     }
+
+    // Only buffer writes on fds open for writing, only prefetch on fds open for reading
+    int accmode = flags & O_ACCMODE;
+    if (accmode == O_RDONLY) state->buffer_enabled = 0;
+    if (accmode == O_WRONLY) state->prefetch_enabled = 0;
 
     state->filter_initialized = 1;
 }
@@ -631,7 +636,7 @@ int open(const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
-        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path, flags);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
             free_fd_entry(fd);
         }
@@ -671,7 +676,7 @@ int open64(const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
-        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path, flags);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
             free_fd_entry(fd);
         }
@@ -709,7 +714,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
-        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path, flags);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
             free_fd_entry(fd);
         }
@@ -758,7 +763,7 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     if (fd >= 0 && (buffering_target || prefetching_target)) {
         drop_stale_fd_entry(fd);
         fd_entry_t *entry = get_or_create_fd_entry(fd);
-        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path);
+        configure_fd_state_for_path(fd, entry ? &entry->state : NULL, path, flags);
         if (entry && !entry->state.buffer_enabled && !entry->state.prefetch_enabled) {
             free_fd_entry(fd);
         }
