@@ -129,6 +129,7 @@ Forward Declarations
 
 static void log_msg(const char *fmt, ...);
 static int get_process_name(char *out, size_t out_size);
+static int get_script_name(char *out, size_t out_size);
 static int target_list_matches_process_name(char **target_list);
 static void init_config_from_env(void);
 static char **split_target_list(const char *value);
@@ -138,6 +139,7 @@ static int list_matches_path(char **patterns, const char *path, const char *base
 static void configure_fd_state_for_path(int fd, fd_state_t *state, const char *path, int flags);
 
 static char process_name[256];
+static char script_name[256];
 static int buffering_target = 0;
 static int prefetching_target = 0;
 
@@ -150,6 +152,9 @@ Initialization
 
 static void init_buffers() {
     get_process_name(process_name, sizeof(process_name));
+    if (fnmatch("*python*", process_name, 0) == 0) {
+        get_script_name(script_name, sizeof(script_name));
+    }
     init_config_from_env();
 
     if (enable_write_buffering && target_list_matches_process_name(buffer_target_list)) buffering_target = 1;
@@ -157,9 +162,11 @@ static void init_buffers() {
 
     if (!buffering_target && !prefetching_target) return;
 
-    log_msg("Initializing buffer library (version %s)...\n%s\nBuffering: %d; Prefetching: %d\n",
+    log_msg("Initializing buffer library (version %s)...\n%s%s%s\nBuffering: %d; Prefetching: %d\n",
         BUFFER_LIB_VERSION,
         process_name[0] ? process_name : "unknown",
+        script_name[0] ? " " : "",
+        script_name,
         buffering_target,
         prefetching_target);
 }
@@ -235,11 +242,52 @@ static int get_process_name(char *out, size_t out_size) {
     return 0;
 }
 
+/*
+For interpreters the exe is e.g. python3.7, so also read the script from
+/proc/self/cmdline: the first argument that is not an option (or the module
+after -m). Uses raw syscalls so the reads are not counted in the stats.
+*/
+static int get_script_name(char *out, size_t out_size) {
+    if (!out || out_size < 2) return -1;
+
+    out[0] = '\0';
+    char cmdline[4096];
+    int fd = syscall(SYS_open, "/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t len = syscall(SYS_read, fd, cmdline, sizeof(cmdline) - 1);
+    syscall(SYS_close, fd);
+    if (len <= 0) return -1;
+    cmdline[len] = '\0';
+
+    // Arguments are NUL-separated; skip argv[0]
+    const char *arg = cmdline + strlen(cmdline) + 1;
+    const char *end = cmdline + len;
+    while (arg < end) {
+        if (strcmp(arg, "-c") == 0) return -1;
+        int takes_value = strcmp(arg, "-m") == 0 || strcmp(arg, "-W") == 0 || strcmp(arg, "-X") == 0;
+        if (arg[0] != '-') {
+            snprintf(out, out_size, "%s", path_basename(arg));
+            return 0;
+        }
+        const char *next = arg + strlen(arg) + 1;
+        if (takes_value && strcmp(arg, "-m") == 0 && next < end) {
+            snprintf(out, out_size, "%s", next);
+            return 0;
+        }
+        arg = takes_value && next < end ? next + strlen(next) + 1 : next;
+    }
+
+    return -1;
+}
+
 static int target_list_matches_process_name(char **target_list) {
     if (!target_list || !process_name[0]) return 0;
 
     for (char **t = target_list; *t; t++) {
         if (strcmp(process_name, *t) == 0) {
+            return 1;
+        }
+        if (script_name[0] && strcmp(script_name, *t) == 0) {
             return 1;
         }
     }
