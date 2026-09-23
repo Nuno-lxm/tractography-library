@@ -27,6 +27,10 @@ Configuration
 #define DEFAULT_WRITE_BUFFER_SIZE (256 * 1024)
 #define DEFAULT_PREFETCH_BUFFER_SIZE (256 * 1024)
 
+#ifndef BUFFER_LIB_VERSION
+#define BUFFER_LIB_VERSION "unknown"
+#endif
+
 static char *prefetching_targets[] = {
     NULL
 };
@@ -144,7 +148,8 @@ static void init_buffers() {
 
     if (!buffering_target && !prefetching_target) return;
 
-    log_msg("Initializing buffer library...\n%s\nBuffering: %d; Prefetching: %d\n",
+    log_msg("Initializing buffer library (version %s)...\n%s\nBuffering: %d; Prefetching: %d\n",
+        BUFFER_LIB_VERSION,
         process_name[0] ? process_name : "unknown",
         buffering_target,
         prefetching_target);

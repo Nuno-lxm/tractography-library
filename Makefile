@@ -1,13 +1,16 @@
 BIN_DIR = bin
 SRC_DIR = src
 
+# Last commit touching buffer_lib.c, plus -dirty if it has uncommitted changes
+BUFFER_LIB_VERSION := $(shell git log -1 --format=%h -- $(SRC_DIR)/buffer_lib.c 2>/dev/null || echo unknown)$(shell git diff --quiet HEAD -- $(SRC_DIR)/buffer_lib.c 2>/dev/null || echo -dirty)
+
 all: buffer_lib.so logger.so test benchmark
 
 bin:
 	mkdir -p $(BIN_DIR)
 
 buffer_lib.so: $(SRC_DIR)/buffer_lib.c | bin
-	gcc -shared -fPIC -Wall -o $(BIN_DIR)/buffer_lib.so $(SRC_DIR)/buffer_lib.c -ldl
+	gcc -shared -fPIC -Wall -O2 -DBUFFER_LIB_VERSION='"$(BUFFER_LIB_VERSION)"' -o $(BIN_DIR)/buffer_lib.so $(SRC_DIR)/buffer_lib.c -ldl
 
 logger.so: $(SRC_DIR)/logger.c | bin
 	gcc -shared -fPIC -Wall -o $(BIN_DIR)/logger.so $(SRC_DIR)/logger.c -ldl
