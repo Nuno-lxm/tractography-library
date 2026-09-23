@@ -567,6 +567,20 @@ static int flush_write_buffer(int fd, char *buf, size_t *pos, fd_state_t *state)
 }
 
 /*
+Prefetching leaves the kernel offset ahead of the logical offset. Drop the
+prefetched data and seek back so a following write lands in the right place.
+*/
+
+static int discard_prefetch(int fd, fd_entry_t *entry) {
+    if (!entry->pf_buf || entry->pf_data_size == 0) return 0;
+
+    if (sync_kernel_to_logical(fd, &entry->state) < 0) return -1;
+    entry->pf_pos = 0;
+    entry->pf_data_size = 0;
+    return 0;
+}
+
+/*
 Flush both write and prefetch buffers for an fd
 */
 
@@ -792,9 +806,15 @@ ssize_t write(int fd, const void *buf, size_t count) {
         ? get_fd_entry(fd)
         : NULL;
 
+    if (entry && discard_prefetch(fd, entry) < 0) return -1;
+
     if (!entry || !entry->state.buffer_enabled) {
         ssize_t bytes = original_write(fd, buf, count);
         update_syscall_writes(bytes > 0 ? (size_t)bytes : 0);
+        if (entry) {
+            advance_kernel_offset(&entry->state, bytes);
+            advance_logical_offset(&entry->state, bytes);
+        }
         return bytes;
     }
 
