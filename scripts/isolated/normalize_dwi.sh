@@ -7,12 +7,22 @@
 #SBATCH --exclusive
 #SBATCH --partition=normal-x86
 #SBATCH --job-name=normalize_dwi
+#SBATCH --no-requeue
 
 # Unified isolated Normalize_DWI test.
 #
 # Usage:
-#   sbatch normalize_dwi.sh --dataset mgh1
-#   sbatch normalize_dwi.sh --dataset mgh1 --buffer
+#   sbatch normalize_dwi.sh --dataset mgh1 --mode none
+#   sbatch normalize_dwi.sh --dataset mgh1 --mode prefetch
+#   sbatch normalize_dwi.sh --dataset mgh1 --mode full
+#
+# Modes (all load x86-buffer.config, so only the library settings differ):
+#   none      library not loaded
+#   prefetch  read prefetching only
+#   full      read prefetching and write buffering (--buffer is an alias)
+#
+# --test-dir NAME puts output, results and work under tests/isolated/NAME
+# (default: normalize).
 #
 # Expected input layout:
 #   data/normalize_dwi/<dataset>/S1/
@@ -26,7 +36,8 @@ set -euo pipefail
 # ── Argument parsing ────────────────────────────────────────────────────────
 
 DATASET=""
-BUFFER=false
+MODE="none"
+TEST_DIR="normalize"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,8 +45,16 @@ while [[ $# -gt 0 ]]; do
             DATASET="$2"
             shift 2
             ;;
+        --test-dir)
+            TEST_DIR="$2"
+            shift 2
+            ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
         --buffer)
-            BUFFER=true
+            MODE="full"
             shift
             ;;
         --help|-h)
@@ -51,9 +70,17 @@ done
 
 if [[ -z "$DATASET" ]]; then
     echo "Error: --dataset is required" >&2
-    echo "Usage: sbatch $0 --dataset NAME [--buffer] [--max-forks N]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--mode none|prefetch|full]" >&2
     exit 1
 fi
+
+case "$MODE" in
+    none|prefetch|full) ;;
+    *)
+        echo "Error: --mode must be none, prefetch or full (got: $MODE)" >&2
+        exit 1
+        ;;
+esac
 
 
 # ── Config & paths ──────────────────────────────────────────────────────────
@@ -63,19 +90,21 @@ pipeline_file="$project_dir/tractography-library/src/normalize_only.nf"
 input_dir="$project_dir/data/normalize_dwi/$DATASET"
 
 baseline_config="$project_dir/tractoflow_files/tractoflow/nextflow.config"
-buffer_config="$project_dir/tractography-library/config-files/deucalion/x86-buffer.config"
+config_dir="$project_dir/tractography-library/config-files/deucalion"
+buffer_lib="$project_dir/tractography-library/bin/buffer_lib.so"
 
-config_args=(-c "$baseline_config")
+config_args=(-c "$baseline_config" -c "$config_dir/x86-buffer.config")
 
-if [[ "$BUFFER" == true ]]; then
-    config_args+=(-c "$buffer_config")
-    test_name="${DATASET}_normalize_buffer_x86"
-else
-    test_name="${DATASET}_normalize_x86"
-fi
-output_dir="$project_dir/output/tests/isolated/normalize/${test_name}_${SLURM_JOB_ID}"
-results_dir="$project_dir/results/tests/isolated/normalize/${test_name}_${SLURM_JOB_ID}"
-work_dir="$project_dir/tractoflow_files/work/tests/isolated/normalize/${test_name}_work_${SLURM_JOB_ID}"
+case "$MODE" in
+    none)     config_args+=(-c "$config_dir/x86-buffer-none.config") ;;
+    prefetch) config_args+=(-c "$config_dir/x86-buffer-prefetch.config") ;;
+    full)     ;;
+esac
+
+test_name="${DATASET}_normalize_${MODE}_x86"
+output_dir="$project_dir/output/tests/isolated/${TEST_DIR}/${test_name}_${SLURM_JOB_ID}"
+results_dir="$project_dir/results/tests/isolated/${TEST_DIR}/${test_name}_${SLURM_JOB_ID}"
+work_dir="$project_dir/tractoflow_files/work/tests/isolated/${TEST_DIR}/${test_name}_work_${SLURM_JOB_ID}"
 
 report_file="$output_dir/report_${test_name}_${SLURM_JOB_ID}.html"
 timeline_file="$output_dir/timeline_${test_name}_${SLURM_JOB_ID}.html"
@@ -124,7 +153,9 @@ fi
 echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "Dataset: $DATASET ($input_dir)"
 echo "Subjects: $subject_count"
-echo "Buffer: $BUFFER"
+echo "Mode: $MODE"
+echo "Node: $(hostname)"
+echo "Buffer lib: $(strings "$buffer_lib" | awk '/^[0-9a-f]{7}(-dirty)?$/ { v = $0 } END { print v ? v : "unknown" }') (md5 $(md5sum "$buffer_lib" | cut -d' ' -f1))"
 echo "Config: ${config_args[*]}"
 echo "Workflow: $pipeline_file"
 
@@ -138,4 +169,11 @@ NXF_VER=21.04.0 nextflow run "$pipeline_file" \
     -w "$work_dir" \
     --input="$input_dir" \
     --output="$results_dir" \
-    "${config_args[@]}" \
+    "${config_args[@]}"
+
+# Show the library settings a task actually ran with
+task_run=$(find "$work_dir" -name .command.run -print -quit)
+if [[ -n "$task_run" ]]; then
+    echo "Task env ($task_run):"
+    grep -E '^export (LD_PRELOAD|BUFFER_)' "$task_run" || echo "  (no buffer settings)"
+fi
