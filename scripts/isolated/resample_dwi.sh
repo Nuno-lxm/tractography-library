@@ -14,13 +14,18 @@
 # Usage:
 #   sbatch resample_dwi.sh --dataset mgh1 --compression gz --mode none
 #   sbatch resample_dwi.sh --dataset mgh1 --compression nii --mode full
+#   sbatch resample_dwi.sh --dataset mgh1 --compression deflate
 #
 # Modes (all load x86-buffer.config, so only the library settings differ):
 #   none      library not loaded
 #   prefetch  read prefetching only
 #   full      read prefetching and write buffering
 #
-# --compression gz|nii  read/write .nii.gz (as in TractoFlow) or uncompressed .nii
+# --compression gz|nii|deflate
+#                       gz: .nii.gz as in TractoFlow; nii: uncompressed .nii;
+#                       deflate: .nii.gz written through compression_lib.so
+#                       (libdeflate), buffer library off (--mode must be none)
+# --debug               with deflate: log every gzopen/gzwrite/gzclose
 # --test-dir NAME       put output, results and work under tests/isolated/NAME
 #                       (default: resample)
 # --publish             copy the resampled DWI to results (off by default: ~6 GB each)
@@ -40,6 +45,7 @@ COMPRESSION="gz"
 TEST_DIR="resample"
 PUBLISH=false
 CLEAN_WORK=false
+DEBUG=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,6 +73,10 @@ while [[ $# -gt 0 ]]; do
             CLEAN_WORK=true
             shift
             ;;
+        --debug)
+            DEBUG=true
+            shift
+            ;;
         --help|-h)
             sed -n '2,/^$/{ s/^# \?//; p }' "$0"
             exit 0
@@ -80,7 +90,7 @@ done
 
 if [[ -z "$DATASET" ]]; then
     echo "Error: --dataset is required" >&2
-    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii] [--mode none|prefetch|full]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate] [--mode none|prefetch|full]" >&2
     exit 1
 fi
 
@@ -93,13 +103,18 @@ case "$MODE" in
 esac
 
 case "$COMPRESSION" in
-    gz)  ext="nii.gz"; data_name="resample_dwi" ;;
-    nii) ext="nii";    data_name="resample_dwi_nii" ;;
+    gz|deflate) ext="nii.gz"; data_name="resample_dwi" ;;
+    nii)        ext="nii";    data_name="resample_dwi_nii" ;;
     *)
-        echo "Error: --compression must be gz or nii (got: $COMPRESSION)" >&2
+        echo "Error: --compression must be gz, nii or deflate (got: $COMPRESSION)" >&2
         exit 1
         ;;
 esac
+
+if [[ "$COMPRESSION" == deflate && "$MODE" != none ]]; then
+    echo "Error: --compression deflate only works with --mode none" >&2
+    exit 1
+fi
 
 
 # ── Config & paths ──────────────────────────────────────────────────────────
@@ -119,6 +134,14 @@ case "$MODE" in
     prefetch) config_args+=(-c "$config_dir/x86-buffer-prefetch.config") ;;
     full)     ;;
 esac
+
+# compression_lib replaces the (disabled) buffer library in LD_PRELOAD
+if [[ "$COMPRESSION" == deflate ]]; then
+    config_args+=(-c "$config_dir/x86-compression.config")
+    if [[ "$DEBUG" == true ]]; then
+        config_args+=(-c "$config_dir/x86-compression-debug.config")
+    fi
+fi
 
 test_name="${DATASET}_resample_${COMPRESSION}_${MODE}_x86"
 output_dir="$project_dir/output/tests/isolated/${TEST_DIR}/${test_name}_${SLURM_JOB_ID}"
@@ -197,8 +220,19 @@ NXF_VER=21.04.0 nextflow run "$pipeline_file" \
 task_run=$(find "$work_dir" -name .command.run -print -quit)
 if [[ -n "$task_run" ]]; then
     echo "Task env ($task_run):"
-    grep -E '^export (LD_PRELOAD|BUFFER_|FSLOUTPUTTYPE)' "$task_run" || echo "  (no buffer settings)"
+    grep -E '^export (LD_PRELOAD|BUFFER_|COMPRESSION_)' "$task_run" || echo "  (no buffer settings)"
 fi
+
+# Per-command times and compression_lib summaries from each task's stderr
+for err in $(find "$work_dir" -name .command.err); do
+    echo "Task $(basename "$(dirname "$err")"):"
+    grep -E '^TIME |^compression_lib:' "$err" | sed 's/^/  /' || true
+done
+
+# Size of every image the tasks wrote (intermediates and output)
+echo "Image files in work dir:"
+find "$work_dir" -type f \( -name '*.nii' -o -name '*.nii.gz' \) -printf '  %s %f\n' |
+    awk '{ printf "  %8.3f GB  %s\n", $1 / 1e9, $2; total += $1 } END { printf "  %8.3f GB  total\n", total / 1e9 }'
 
 # Kernel I/O counters summed over all tasks (independent of what the library sees)
 find "$work_dir" -name .command.trace -exec cat {} + | awk -F= '
