@@ -443,14 +443,24 @@ int deflateEnd(z_streamp strm) {
     }
 
     int slot = find_stream(strm);
-    if (slot >= 0){
-        stream_handle_t *s = streams[slot];
-        // One summary line per stream, always printed
-        fprintf(stderr, "compression_lib: stream level %d, %lu calls, %lu sync flushes, %lu -> %lu bytes, %.2f s\n",
-            s->level, s->calls, s->sync_flushes, strm->total_in, strm->total_out, s->compress_time);
-        free_stream(slot);
+    if (slot < 0){
+        return original_deflateEnd(strm);
     }
-    return original_deflateEnd(strm);
+
+    stream_handle_t *s = streams[slot];
+    // One summary line per stream, always printed
+    fprintf(stderr, "compression_lib: stream level %d, %lu calls, %lu sync flushes, %lu -> %lu bytes, %.2f s\n",
+        s->level, s->calls, s->sync_flushes, strm->total_in, strm->total_out, s->compress_time);
+    int incomplete = s->calls > 0 && !(s->finished && s->out_pos == s->out_size);
+    free_stream(slot);
+
+    // The real stream never saw deflate(), and zlib 1.2.11 starts raw streams
+    // busy, so its deflateEnd reports Z_DATA_ERROR; answer from our own state
+    int ret = original_deflateEnd(strm);
+    if (ret == Z_STREAM_ERROR){
+        return ret;
+    }
+    return incomplete ? Z_DATA_ERROR : Z_OK;
 }
 
 
