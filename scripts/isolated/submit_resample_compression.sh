@@ -1,9 +1,9 @@
 #!/bin/bash
-# Submit resample_dwi.sh for gz, deflate-py (compression_lib) and nii, several
+# Submit resample_dwi.sh for gz, deflate-py, deflate-all (compression_lib) and nii, several
 # times, one job after another. The order rotates every repeat so no
 # compression always runs first. Results go under tests/isolated/resample_compression;
 # only the first repeat publishes its output (for the correctness check).
-# With LEVEL, deflate-py compresses every image at that libdeflate level.
+# With LEVEL, deflate-py and deflate-all compress every image at that libdeflate level.
 #
 # Usage:
 #   submit_resample_compression.sh mgh1
@@ -14,7 +14,7 @@ set -euo pipefail
 DATASET="${1:?Usage: $0 DATASET [LEVEL]}"
 LEVEL="${2:-}"
 REPEATS=1
-COMPRESSIONS=(gz deflate-py nii)
+COMPRESSIONS=(gz deflate-py deflate-all nii)
 
 script="/projects/I20240002/nunolxm/tractography-library/scripts/isolated/resample_dwi.sh"
 

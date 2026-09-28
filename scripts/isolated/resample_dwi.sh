@@ -16,21 +16,24 @@
 #   sbatch resample_dwi.sh --dataset mgh1 --compression nii --mode full
 #   sbatch resample_dwi.sh --dataset mgh1 --compression deflate
 #   sbatch resample_dwi.sh --dataset mgh1 --compression deflate-py
+#   sbatch resample_dwi.sh --dataset mgh1 --compression deflate-all
 #
 # Modes (all load x86-buffer.config, so only the library settings differ):
 #   none      library not loaded
 #   prefetch  read prefetching only
 #   full      read prefetching and write buffering
 #
-# --compression gz|nii|deflate|deflate-py
+# --compression gz|nii|deflate|deflate-py|deflate-all
 #                       gz: .nii.gz as in TractoFlow; nii: uncompressed .nii;
 #                       deflate: .nii.gz written through compression_lib.so
 #                       (libdeflate), buffer library off (--mode must be none);
 #                       deflate-py: deflate plus Python's zlib streams
-#                       (nibabel) and crc32 through libdeflate
-# --debug               with deflate/deflate-py: log every gzopen/gzwrite/gzclose
-#                       and deflateInit2_/deflate/deflateEnd
-# --level N             with deflate/deflate-py: compress every image at libdeflate
+#                       (nibabel) and crc32 through libdeflate;
+#                       deflate-all: deflate-py plus gz reads (FSL, MRtrix)
+#                       decompressed with libdeflate
+# --debug               with deflate*: log every gzopen/gzwrite/gzclose,
+#                       deflateInit2_/deflate/deflateEnd and gzread/gzseek
+# --level N             with deflate*: compress every image at libdeflate
 #                       level N (0-12) instead of the level each tool asks for
 # --test-dir NAME       put output, results and work under tests/isolated/NAME
 #                       (default: resample)
@@ -101,7 +104,7 @@ done
 
 if [[ -z "$DATASET" ]]; then
     echo "Error: --dataset is required" >&2
-    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate|deflate-py] [--mode none|prefetch|full] [--level N]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate|deflate-py|deflate-all] [--mode none|prefetch|full] [--level N]" >&2
     exit 1
 fi
 
@@ -114,10 +117,10 @@ case "$MODE" in
 esac
 
 case "$COMPRESSION" in
-    gz|deflate|deflate-py) ext="nii.gz"; data_name="resample_dwi" ;;
-    nii)                   ext="nii";    data_name="resample_dwi_nii" ;;
+    gz|deflate|deflate-py|deflate-all) ext="nii.gz"; data_name="resample_dwi" ;;
+    nii)                               ext="nii";    data_name="resample_dwi_nii" ;;
     *)
-        echo "Error: --compression must be gz, nii, deflate or deflate-py (got: $COMPRESSION)" >&2
+        echo "Error: --compression must be gz, nii, deflate, deflate-py or deflate-all (got: $COMPRESSION)" >&2
         exit 1
         ;;
 esac
@@ -129,7 +132,7 @@ fi
 
 if [[ -n "$LEVEL" ]]; then
     if [[ "$COMPRESSION" != deflate* ]]; then
-        echo "Error: --level only works with --compression deflate or deflate-py" >&2
+        echo "Error: --level only works with --compression deflate, deflate-py or deflate-all" >&2
         exit 1
     fi
     if ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); then
@@ -160,8 +163,11 @@ esac
 # compression_lib replaces the (disabled) buffer library in LD_PRELOAD
 if [[ "$COMPRESSION" == deflate* ]]; then
     config_args+=(-c "$config_dir/x86-compression.config")
-    if [[ "$COMPRESSION" == deflate-py ]]; then
+    if [[ "$COMPRESSION" == deflate-py || "$COMPRESSION" == deflate-all ]]; then
         config_args+=(-c "$config_dir/x86-compression-streams.config")
+    fi
+    if [[ "$COMPRESSION" == deflate-all ]]; then
+        config_args+=(-c "$config_dir/x86-compression-reads.config")
     fi
     if [[ "$DEBUG" == true ]]; then
         config_args+=(-c "$config_dir/x86-compression-debug.config")
