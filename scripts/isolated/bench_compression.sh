@@ -31,19 +31,28 @@ project_dir="/projects/I20240002/nunolxm"
 lib_dir="$project_dir/tractography-library"
 container="$project_dir/tractoflow_files/scilus_1.6.0.sif"
 
+# The container ships libzstd.so.1 (1.4.8) but not its header or libzstd.so,
+# so build against the matching release's zstd.h and link the library by name
+zstd_include="$project_dir/tractoflow_files/zstd-1.4.8/include"
+if [[ ! -f "$zstd_include/zstd.h" ]]; then
+    echo "Error: $zstd_include/zstd.h missing; fetch it with:" >&2
+    echo "  mkdir -p $zstd_include && curl -fL -o $zstd_include/zstd.h https://raw.githubusercontent.com/facebook/zstd/v1.4.8/lib/zstd.h" >&2
+    exit 1
+fi
+
 echo "Node: $(hostname)"
 echo "Arguments: $*"
 
 # Bind the project so the input paths work unchanged inside the container
-singularity exec --no-home --bind "$lib_dir:/mnt" --bind "$project_dir:$project_dir" "$container" \
-    bash -s -- "$@" <<'EOF'
+singularity exec --no-home --bind "$lib_dir:/mnt" --bind "$project_dir:$project_dir" \
+    --bind "$zstd_include:/zstd" "$container" bash -s -- "$@" <<'EOF'
 set -e
 for h in zlib.h libdeflate.h zstd.h; do
-    header=$(echo "#include <$h>" | gcc -E -x c - 2>/dev/null | grep -m1 -o "/[^\"]*$h" || true)
+    header=$(echo "#include <$h>" | gcc -I/zstd -E -x c - 2>/dev/null | grep -m1 -o "/[^\"]*$h" || true)
     [[ -n "$header" ]] || { echo "Error: $h not found in the container"; exit 1; }
     echo "$h: $header"
 done
 
-make -C /mnt bench_compression
+make -B -C /mnt bench_compression ZSTD_CFLAGS=-I/zstd ZSTD_LIBS=-l:libzstd.so.1
 /mnt/bin/bench_compression "$@"
 EOF

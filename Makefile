@@ -27,9 +27,13 @@ test: tests/test.c | bin
 test_compression: tests/test_compression.c | bin
 	gcc -Wall -o $(BIN_DIR)/test_compression tests/test_compression.c -lzstd -lz
 
-# Not in all: needs the zlib, libdeflate and zstd dev headers
+# Not in all: needs the zlib, libdeflate and zstd dev headers. The TractoFlow
+# container has no zstd dev package, so bench_compression.sh overrides these
+ZSTD_CFLAGS =
+ZSTD_LIBS = -lzstd
+
 bench_compression: tests/bench_compression.c | bin
-	gcc -Wall -O2 -o $(BIN_DIR)/bench_compression tests/bench_compression.c -lz -ldeflate -lzstd
+	gcc -Wall -O2 $(ZSTD_CFLAGS) -o $(BIN_DIR)/bench_compression tests/bench_compression.c -lz -ldeflate $(ZSTD_LIBS)
 
 benchmark: tests/benchmark.c | bin
 	gcc -Wall -O2 -o $(BIN_DIR)/benchmark tests/benchmark.c
