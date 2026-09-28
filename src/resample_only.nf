@@ -28,7 +28,7 @@ Channel
 
 process Resample_DWI_ONLY {
     tag "$sid"
-    cpus 1
+    cpus 3
 
     publishDir "${params.output}/${sid}", mode: 'copy', enabled: params.publish
 
