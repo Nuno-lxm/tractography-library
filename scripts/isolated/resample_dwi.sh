@@ -15,17 +15,21 @@
 #   sbatch resample_dwi.sh --dataset mgh1 --compression gz --mode none
 #   sbatch resample_dwi.sh --dataset mgh1 --compression nii --mode full
 #   sbatch resample_dwi.sh --dataset mgh1 --compression deflate
+#   sbatch resample_dwi.sh --dataset mgh1 --compression deflate-py
 #
 # Modes (all load x86-buffer.config, so only the library settings differ):
 #   none      library not loaded
 #   prefetch  read prefetching only
 #   full      read prefetching and write buffering
 #
-# --compression gz|nii|deflate
+# --compression gz|nii|deflate|deflate-py
 #                       gz: .nii.gz as in TractoFlow; nii: uncompressed .nii;
 #                       deflate: .nii.gz written through compression_lib.so
-#                       (libdeflate), buffer library off (--mode must be none)
-# --debug               with deflate: log every gzopen/gzwrite/gzclose
+#                       (libdeflate), buffer library off (--mode must be none);
+#                       deflate-py: deflate plus Python's zlib streams
+#                       (nibabel) and crc32 through libdeflate
+# --debug               with deflate/deflate-py: log every gzopen/gzwrite/gzclose
+#                       and deflateInit2_/deflate/deflateEnd
 # --test-dir NAME       put output, results and work under tests/isolated/NAME
 #                       (default: resample)
 # --publish             copy the resampled DWI to results (off by default: ~6 GB each)
@@ -90,7 +94,7 @@ done
 
 if [[ -z "$DATASET" ]]; then
     echo "Error: --dataset is required" >&2
-    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate] [--mode none|prefetch|full]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate|deflate-py] [--mode none|prefetch|full]" >&2
     exit 1
 fi
 
@@ -103,16 +107,16 @@ case "$MODE" in
 esac
 
 case "$COMPRESSION" in
-    gz|deflate) ext="nii.gz"; data_name="resample_dwi" ;;
-    nii)        ext="nii";    data_name="resample_dwi_nii" ;;
+    gz|deflate|deflate-py) ext="nii.gz"; data_name="resample_dwi" ;;
+    nii)                   ext="nii";    data_name="resample_dwi_nii" ;;
     *)
-        echo "Error: --compression must be gz, nii or deflate (got: $COMPRESSION)" >&2
+        echo "Error: --compression must be gz, nii, deflate or deflate-py (got: $COMPRESSION)" >&2
         exit 1
         ;;
 esac
 
-if [[ "$COMPRESSION" == deflate && "$MODE" != none ]]; then
-    echo "Error: --compression deflate only works with --mode none" >&2
+if [[ "$COMPRESSION" == deflate* && "$MODE" != none ]]; then
+    echo "Error: --compression $COMPRESSION only works with --mode none" >&2
     exit 1
 fi
 
@@ -136,8 +140,11 @@ case "$MODE" in
 esac
 
 # compression_lib replaces the (disabled) buffer library in LD_PRELOAD
-if [[ "$COMPRESSION" == deflate ]]; then
+if [[ "$COMPRESSION" == deflate* ]]; then
     config_args+=(-c "$config_dir/x86-compression.config")
+    if [[ "$COMPRESSION" == deflate-py ]]; then
+        config_args+=(-c "$config_dir/x86-compression-streams.config")
+    fi
     if [[ "$DEBUG" == true ]]; then
         config_args+=(-c "$config_dir/x86-compression-debug.config")
     fi

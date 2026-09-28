@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit resample_dwi.sh for gz, deflate (compression_lib) and nii, several
+# Submit resample_dwi.sh for gz, deflate, deflate-py (compression_lib) and nii, several
 # times, one job after another. The order rotates every repeat so no
 # compression always runs first. Results go under tests/isolated/resample_compression;
 # only the first repeat publishes its output (for the correctness check).
@@ -11,7 +11,7 @@ set -euo pipefail
 
 DATASET="${1:?Usage: $0 DATASET}"
 REPEATS=1
-COMPRESSIONS=(gz deflate nii)
+COMPRESSIONS=(gz deflate deflate-py nii)
 
 script="/projects/I20240002/nunolxm/tractography-library/scripts/isolated/resample_dwi.sh"
 
