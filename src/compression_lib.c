@@ -21,6 +21,8 @@ typedef int (*original_deflateInit2__t)(z_streamp strm, int level, int method, i
                                          int memLevel, int strategy, const char *version, int stream_size);
 typedef int (*original_deflate_t)(z_streamp strm, int flush);
 typedef int (*original_deflateEnd_t)(z_streamp strm);
+typedef int (*original_deflateSetDictionary_t)(z_streamp strm, const Bytef *dictionary, uInt dictLength);
+typedef int (*original_deflateCopy_t)(z_streamp dest, z_streamp source);
 
 
 typedef struct{
@@ -448,4 +450,33 @@ int deflateEnd(z_streamp strm) {
         free_stream(slot);
     }
     return original_deflateEnd(strm);
+}
+
+
+int deflateSetDictionary(z_streamp strm, const Bytef *dictionary, uInt dictLength) {
+    static original_deflateSetDictionary_t original_deflateSetDictionary = NULL;
+    if (!original_deflateSetDictionary) original_deflateSetDictionary = zlib_symbol("deflateSetDictionary");
+
+    // libdeflate has no preset dictionaries: give the stream back to zlib.
+    // It comes right after init, so nothing has been buffered yet
+    int slot = find_stream(strm);
+    if (slot >= 0 && streams[slot]->in_size == 0 && !streams[slot]->finished){
+        free_stream(slot);
+    } else if (slot >= 0){
+        return Z_STREAM_ERROR;
+    }
+    return original_deflateSetDictionary(strm, dictionary, dictLength);
+}
+
+
+int deflateCopy(z_streamp dest, z_streamp source) {
+    static original_deflateCopy_t original_deflateCopy = NULL;
+    if (!original_deflateCopy) original_deflateCopy = zlib_symbol("deflateCopy");
+
+    // The buffered input lives in our handle, not in zlib's state, so a copy
+    // made by zlib would silently lose it
+    if (find_stream(source) >= 0){
+        return Z_STREAM_ERROR;
+    }
+    return original_deflateCopy(dest, source);
 }

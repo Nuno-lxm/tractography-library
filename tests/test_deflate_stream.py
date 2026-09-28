@@ -55,6 +55,27 @@ def check_gzip_wrapper_stream(data):
     return gzip.decompress(out) == data
 
 
+def check_dictionary(data):
+    # Streams with a preset dictionary are handed back to zlib
+    zdict = data[:32768]
+    c = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS, zdict=zdict)
+    out = c.compress(data) + c.flush()
+    d = zlib.decompressobj(-zlib.MAX_WBITS, zdict=zdict)
+    return d.decompress(out) + d.flush() == data
+
+
+def check_copy(data):
+    # Copying a taken-over stream must fail loudly, never give wrong output
+    c = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+    head = c.compress(data[:1000])
+    try:
+        c2 = c.copy()
+    except ValueError:
+        return True
+    out = head + c2.compress(data[1000:]) + c2.flush()
+    return zlib.decompress(out, -zlib.MAX_WBITS) == data
+
+
 def check_crc32(data):
     return (zlib.crc32(data) == binascii.crc32(data)
             and zlib.crc32(data[1000:], zlib.crc32(data[:1000])) == binascii.crc32(data)
@@ -70,6 +91,8 @@ def main():
         ("raw stream with sync flush", lambda: check_raw_stream(data)),
         ("empty raw stream", check_empty_stream),
         ("gzip wrapper stream (wbits 31)", lambda: check_gzip_wrapper_stream(data)),
+        ("preset dictionary", lambda: check_dictionary(data)),
+        ("stream copy", lambda: check_copy(data)),
         ("crc32", lambda: check_crc32(data)),
     ]
 
