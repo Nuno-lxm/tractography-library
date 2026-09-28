@@ -153,10 +153,9 @@ static int write_all(int fd, const void *buf, size_t len){
     return 0;
 }
 
-gzFile gzopen(const char *path, const char *mode) {
-    static original_gzopen_t original_gzopen = NULL;
-    if (!original_gzopen) original_gzopen = dlsym(RTLD_NEXT, "gzopen");
-
+// Shared by gzopen and gzopen64 (programs built with large file support
+// call the latter); only the real function differs
+static gzFile open_gz(const char *path, const char *mode, original_gzopen_t original_gzopen) {
     if (!strchr(mode, 'w')){
         return original_gzopen(path, mode);
     }
@@ -187,6 +186,20 @@ gzFile gzopen(const char *path, const char *mode) {
         fprintf(stderr, "gzopen called for path: %s, mode: %s\n", path, mode);
     }
     return (gzFile)h;
+}
+
+gzFile gzopen(const char *path, const char *mode) {
+    static original_gzopen_t original_gzopen = NULL;
+    if (!original_gzopen) original_gzopen = zlib_symbol("gzopen");
+
+    return open_gz(path, mode, original_gzopen);
+}
+
+gzFile gzopen64(const char *path, const char *mode) {
+    static original_gzopen_t original_gzopen64 = NULL;
+    if (!original_gzopen64) original_gzopen64 = zlib_symbol("gzopen64");
+
+    return open_gz(path, mode, original_gzopen64);
 }
 
 
