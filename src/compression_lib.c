@@ -17,6 +17,10 @@
 typedef gzFile (*original_gzopen_t)(const char *path, const char *mode);
 typedef int (*original_gzclose_t)(gzFile file);
 typedef int (*original_gzwrite_t)(gzFile file, const void *buf, unsigned int len);
+typedef int (*original_deflateInit2__t)(z_streamp strm, int level, int method, int windowBits,
+                                         int memLevel, int strategy, const char *version, int stream_size);
+typedef int (*original_deflate_t)(z_streamp strm, int flush);
+typedef int (*original_deflateEnd_t)(z_streamp strm);
 
 
 typedef struct{
@@ -36,6 +40,22 @@ static int debug_enabled(void){
         enabled = getenv("COMPRESSION_DEBUG") != NULL;
     }
     return enabled;
+}
+
+// Python loads its zlib module (and libz) with RTLD_LOCAL, so RTLD_NEXT can't
+// see libz there; fall back to the copy of libz.so.1 that is already loaded
+static void *zlib_symbol(const char *name){
+    void *sym = dlsym(RTLD_NEXT, name);
+    if (!sym){
+        void *libz = dlopen("libz.so.1", RTLD_LAZY | RTLD_NOLOAD);
+        if (!libz){
+            libz = dlopen("libz.so.1", RTLD_LAZY);
+        }
+        if (libz){
+            sym = dlsym(libz, name);
+        }
+    }
+    return sym;
 }
 
 static double now(void){
@@ -187,4 +207,42 @@ int gzclose(gzFile file) {
         fprintf(stderr, "gzclose called for file: %p\n", (void*)file);
     }
     return ret;
+}
+
+/* Raw deflate streams (Python's gzip/zlib modules) */
+
+int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
+                  int memLevel, int strategy, const char *version, int stream_size) {
+    static original_deflateInit2__t original_deflateInit2_ = NULL;
+    if (!original_deflateInit2_) original_deflateInit2_ = zlib_symbol("deflateInit2_");
+
+    if (debug_enabled()){
+        fprintf(stderr, "deflateInit2_: strm %p, level %d, windowBits %d, memLevel %d, strategy %d\n",
+            (void*)strm, level, windowBits, memLevel, strategy);
+    }
+    return original_deflateInit2_(strm, level, method, windowBits, memLevel, strategy, version, stream_size);
+}
+
+
+int deflate(z_streamp strm, int flush) {
+    static original_deflate_t original_deflate = NULL;
+    if (!original_deflate) original_deflate = zlib_symbol("deflate");
+
+    if (debug_enabled()){
+        fprintf(stderr, "deflate: strm %p, flush %d, avail_in %u, avail_out %u\n",
+            (void*)strm, flush, strm->avail_in, strm->avail_out);
+    }
+    return original_deflate(strm, flush);
+}
+
+
+int deflateEnd(z_streamp strm) {
+    static original_deflateEnd_t original_deflateEnd = NULL;
+    if (!original_deflateEnd) original_deflateEnd = zlib_symbol("deflateEnd");
+
+    if (debug_enabled()){
+        fprintf(stderr, "deflateEnd: strm %p, total_in %lu, total_out %lu\n",
+            (void*)strm, strm->total_in, strm->total_out);
+    }
+    return original_deflateEnd(strm);
 }
