@@ -45,17 +45,22 @@ process Resample_DWI_ONLY {
     export OPENBLAS_NUM_THREADS=1
     export FSLOUTPUTTYPE=$fsl_output_type
 
-    scil_resample_volume.py $dwi \
+    # Per-command wall time, written to .command.err
+    TIMEFORMAT="TIME resample_dwi %R s"
+    time scil_resample_volume.py $dwi \
         dwi_resample.${params.ext} \
         --voxel_size $params.dwi_resolution \
         --interp $params.dwi_interpolation
-    fslmaths dwi_resample.${params.ext} -thr 0 dwi_resample_clipped.${params.ext}
-    scil_resample_volume.py $mask \
+    TIMEFORMAT="TIME fslmaths %R s"
+    time fslmaths dwi_resample.${params.ext} -thr 0 dwi_resample_clipped.${params.ext}
+    TIMEFORMAT="TIME resample_mask %R s"
+    time scil_resample_volume.py $mask \
         mask_resample.${params.ext} \
         --ref dwi_resample.${params.ext} \
         --enforce_dimensions \
         --interp nn
-    mrcalc dwi_resample_clipped.${params.ext} mask_resample.${params.ext} \
+    TIMEFORMAT="TIME mrcalc %R s"
+    time mrcalc dwi_resample_clipped.${params.ext} mask_resample.${params.ext} \
         -mult ${sid}__dwi_resampled.${params.ext} -quiet -nthreads 1
     """
 }
