@@ -23,6 +23,7 @@ typedef int (*original_deflate_t)(z_streamp strm, int flush);
 typedef int (*original_deflateEnd_t)(z_streamp strm);
 typedef int (*original_deflateSetDictionary_t)(z_streamp strm, const Bytef *dictionary, uInt dictLength);
 typedef int (*original_deflateCopy_t)(z_streamp dest, z_streamp source);
+typedef uLong (*original_crc32_t)(uLong crc, const Bytef *buf, uInt len);
 
 
 typedef struct{
@@ -479,4 +480,21 @@ int deflateCopy(z_streamp dest, z_streamp source) {
         return Z_STREAM_ERROR;
     }
     return original_deflateCopy(dest, source);
+}
+
+
+// Python's gzip checksums every chunk it writes or reads; libdeflate's crc32
+// gives the same values, faster
+uLong crc32(uLong crc, const Bytef *buf, uInt len) {
+    static original_crc32_t original_crc32 = NULL;
+    if (!original_crc32) original_crc32 = zlib_symbol("crc32");
+
+    if (!streams_enabled()){
+        return original_crc32(crc, buf, len);
+    }
+    // zlib returns the initial value for a NULL buffer, whatever crc is
+    if (!buf){
+        return 0;
+    }
+    return libdeflate_crc32(crc, buf, len);
 }
