@@ -24,6 +24,15 @@ typedef int (*original_deflateEnd_t)(z_streamp strm);
 typedef int (*original_deflateSetDictionary_t)(z_streamp strm, const Bytef *dictionary, uInt dictLength);
 typedef int (*original_deflateCopy_t)(z_streamp dest, z_streamp source);
 typedef uLong (*original_crc32_t)(uLong crc, const Bytef *buf, uInt len);
+typedef int (*original_gzread_t)(gzFile file, voidp buf, unsigned len);
+typedef z_size_t (*original_gzfread_t)(voidp buf, z_size_t size, z_size_t nitems, gzFile file);
+typedef char *(*original_gzgets_t)(gzFile file, char *buf, int len);
+typedef int (*original_gzgetc_t)(gzFile file);
+typedef int (*original_gzungetc_t)(int c, gzFile file);
+typedef z_off64_t (*original_gzseek64_t)(gzFile file, z_off64_t offset, int whence);
+typedef z_off64_t (*original_gztell64_t)(gzFile file);
+typedef int (*original_gzrewind_t)(gzFile file);
+typedef int (*original_gzeof_t)(gzFile file);
 
 
 typedef struct{
@@ -56,6 +65,15 @@ typedef struct{
 
 static stream_handle_t *streams[MAX_HANDLES];
 
+// A gz file opened for reading. The caller keeps zlib's own handle (real), so
+// any gz function not wrapped here still works on it
+typedef struct{
+    gzFile real;
+    char *path;
+} read_handle_t;
+
+static read_handle_t *readers[MAX_HANDLES];
+
 // Per-call prints only with COMPRESSION_DEBUG set; they cost a write to stderr each
 static int debug_enabled(void){
     static int enabled = -1;
@@ -70,6 +88,16 @@ static int streams_enabled(void){
     static int enabled = -1;
     if (enabled < 0){
         const char *env = getenv("COMPRESSION_STREAMS");
+        enabled = env && atoi(env) != 0;
+    }
+    return enabled;
+}
+
+// gz reads are only served by libdeflate with COMPRESSION_READS=1
+static int reads_enabled(void){
+    static int enabled = -1;
+    if (enabled < 0){
+        const char *env = getenv("COMPRESSION_READS");
         enabled = env && atoi(env) != 0;
     }
     return enabled;
@@ -122,6 +150,21 @@ static void free_stream(int slot){
     free(s);
 }
 
+static int find_reader(gzFile file){
+    for (int i = 0; i < MAX_HANDLES; i++){
+        if (readers[i] && readers[i]->real == file)
+            return i;
+    }
+    return -1;
+}
+
+static void free_reader(int slot){
+    read_handle_t *r = readers[slot];
+    readers[slot] = NULL;
+    free(r->path);
+    free(r);
+}
+
 // COMPRESSION_LEVEL overrides whatever level the caller asked for
 static int env_level(int fallback){
     const char *env = getenv("COMPRESSION_LEVEL");
@@ -153,11 +196,50 @@ static int write_all(int fd, const void *buf, size_t len){
     return 0;
 }
 
+// Reading: open with zlib as usual and remember the handle
+static gzFile open_gz_read(const char *path, const char *mode, original_gzopen_t original_gzopen) {
+    gzFile real = original_gzopen(path, mode);
+    if (!real || !reads_enabled()){
+        return real;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_HANDLES; i++){
+        if (!readers[i]){
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0){
+        return real;
+    }
+
+    read_handle_t *r = calloc(1, sizeof(read_handle_t));
+    if (!r){
+        return real;
+    }
+    r->real = real;
+    r->path = strdup(path);
+    if (!r->path){
+        free(r);
+        return real;
+    }
+    readers[slot] = r;
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzopen read: path %s, mode %s, file %p\n", path, mode, (void*)real);
+    }
+    return real;
+}
+
 // Shared by gzopen and gzopen64 (programs built with large file support
 // call the latter); only the real function differs
 static gzFile open_gz(const char *path, const char *mode, original_gzopen_t original_gzopen) {
-    if (!strchr(mode, 'w')){
+    if (strchr(mode, 'a')){
         return original_gzopen(path, mode);
+    }
+    if (!strchr(mode, 'w')){
+        return open_gz_read(path, mode, original_gzopen);
     }
 
     int slot = -1;
@@ -241,6 +323,12 @@ int gzclose(gzFile file) {
     static original_gzclose_t original_gzclose = NULL;
     if (!original_gzclose) original_gzclose = dlsym(RTLD_NEXT, "gzclose");
 
+    int reader = find_reader(file);
+    if (reader >= 0){
+        free_reader(reader);
+        return original_gzclose(file);
+    }
+
     int slot = find_handle(file);
     if (slot < 0){
         return original_gzclose(file);
@@ -276,6 +364,132 @@ int gzclose(gzFile file) {
     }
     return ret;
 }
+
+/* gz reads (FSL, MRtrix) */
+
+int gzread(gzFile file, voidp buf, unsigned len) {
+    static original_gzread_t original_gzread = NULL;
+    if (!original_gzread) original_gzread = zlib_symbol("gzread");
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzread: file %p, len %u\n", (void*)file, len);
+    }
+    return original_gzread(file, buf, len);
+}
+
+
+z_size_t gzfread(voidp buf, z_size_t size, z_size_t nitems, gzFile file) {
+    static original_gzfread_t original_gzfread = NULL;
+    if (!original_gzfread) original_gzfread = zlib_symbol("gzfread");
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzfread: file %p, size %zu, nitems %zu\n", (void*)file, (size_t)size, (size_t)nitems);
+    }
+    return original_gzfread(buf, size, nitems, file);
+}
+
+
+char *gzgets(gzFile file, char *buf, int len) {
+    static original_gzgets_t original_gzgets = NULL;
+    if (!original_gzgets) original_gzgets = zlib_symbol("gzgets");
+
+    return original_gzgets(file, buf, len);
+}
+
+
+// Parentheses keep zlib.h's gzgetc() macro from expanding here
+int (gzgetc)(gzFile file) {
+    static original_gzgetc_t original_gzgetc = NULL;
+    if (!original_gzgetc) original_gzgetc = zlib_symbol("gzgetc");
+
+    return original_gzgetc(file);
+}
+
+int gzgetc_(gzFile file) {
+    static original_gzgetc_t original_gzgetc_ = NULL;
+    if (!original_gzgetc_) original_gzgetc_ = zlib_symbol("gzgetc_");
+
+    return original_gzgetc_(file);
+}
+
+
+int gzungetc(int c, gzFile file) {
+    static original_gzungetc_t original_gzungetc = NULL;
+    if (!original_gzungetc) original_gzungetc = zlib_symbol("gzungetc");
+
+    return original_gzungetc(c, file);
+}
+
+
+// Shared by gzseek and gzseek64; z_off_t and z_off64_t are both 64 bits on x86_64
+static z_off64_t seek_gz(gzFile file, z_off64_t offset, int whence, original_gzseek64_t original_seek) {
+    if (debug_enabled()){
+        fprintf(stderr, "gzseek: file %p, offset %lld, whence %d\n", (void*)file, (long long)offset, whence);
+    }
+    return original_seek(file, offset, whence);
+}
+
+z_off_t gzseek(gzFile file, z_off_t offset, int whence) {
+    static original_gzseek64_t original_gzseek = NULL;
+    if (!original_gzseek) original_gzseek = zlib_symbol("gzseek");
+
+    return seek_gz(file, offset, whence, original_gzseek);
+}
+
+z_off64_t gzseek64(gzFile file, z_off64_t offset, int whence) {
+    static original_gzseek64_t original_gzseek64 = NULL;
+    if (!original_gzseek64) original_gzseek64 = zlib_symbol("gzseek64");
+
+    return seek_gz(file, offset, whence, original_gzseek64);
+}
+
+
+static z_off64_t tell_gz(gzFile file, original_gztell64_t original_tell) {
+    return original_tell(file);
+}
+
+z_off_t gztell(gzFile file) {
+    static original_gztell64_t original_gztell = NULL;
+    if (!original_gztell) original_gztell = zlib_symbol("gztell");
+
+    return tell_gz(file, original_gztell);
+}
+
+z_off64_t gztell64(gzFile file) {
+    static original_gztell64_t original_gztell64 = NULL;
+    if (!original_gztell64) original_gztell64 = zlib_symbol("gztell64");
+
+    return tell_gz(file, original_gztell64);
+}
+
+
+int gzrewind(gzFile file) {
+    static original_gzrewind_t original_gzrewind = NULL;
+    if (!original_gzrewind) original_gzrewind = zlib_symbol("gzrewind");
+
+    return original_gzrewind(file);
+}
+
+
+int gzeof(gzFile file) {
+    static original_gzeof_t original_gzeof = NULL;
+    if (!original_gzeof) original_gzeof = zlib_symbol("gzeof");
+
+    return original_gzeof(file);
+}
+
+
+int gzclose_r(gzFile file) {
+    static original_gzclose_t original_gzclose_r = NULL;
+    if (!original_gzclose_r) original_gzclose_r = zlib_symbol("gzclose_r");
+
+    int reader = find_reader(file);
+    if (reader >= 0){
+        free_reader(reader);
+    }
+    return original_gzclose_r(file);
+}
+
 
 /* Raw deflate streams (Python's gzip/zlib modules) */
 
