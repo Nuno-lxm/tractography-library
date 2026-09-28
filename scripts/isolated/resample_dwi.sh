@@ -30,6 +30,8 @@
 #                       (nibabel) and crc32 through libdeflate
 # --debug               with deflate/deflate-py: log every gzopen/gzwrite/gzclose
 #                       and deflateInit2_/deflate/deflateEnd
+# --level N             with deflate/deflate-py: compress every image at libdeflate
+#                       level N (0-12) instead of the level each tool asks for
 # --test-dir NAME       put output, results and work under tests/isolated/NAME
 #                       (default: resample)
 # --publish             copy the resampled DWI to results (off by default: ~6 GB each)
@@ -50,6 +52,7 @@ TEST_DIR="resample"
 PUBLISH=false
 CLEAN_WORK=false
 DEBUG=false
+LEVEL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -81,6 +84,10 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift
             ;;
+        --level)
+            LEVEL="$2"
+            shift 2
+            ;;
         --help|-h)
             sed -n '2,/^$/{ s/^# \?//; p }' "$0"
             exit 0
@@ -94,7 +101,7 @@ done
 
 if [[ -z "$DATASET" ]]; then
     echo "Error: --dataset is required" >&2
-    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate|deflate-py] [--mode none|prefetch|full]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--compression gz|nii|deflate|deflate-py] [--mode none|prefetch|full] [--level N]" >&2
     exit 1
 fi
 
@@ -118,6 +125,17 @@ esac
 if [[ "$COMPRESSION" == deflate* && "$MODE" != none ]]; then
     echo "Error: --compression $COMPRESSION only works with --mode none" >&2
     exit 1
+fi
+
+if [[ -n "$LEVEL" ]]; then
+    if [[ "$COMPRESSION" != deflate* ]]; then
+        echo "Error: --level only works with --compression deflate or deflate-py" >&2
+        exit 1
+    fi
+    if ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); then
+        echo "Error: --level must be 0-12 (got: $LEVEL)" >&2
+        exit 1
+    fi
 fi
 
 
@@ -150,7 +168,7 @@ if [[ "$COMPRESSION" == deflate* ]]; then
     fi
 fi
 
-test_name="${DATASET}_resample_${COMPRESSION}_${MODE}_x86"
+test_name="${DATASET}_resample_${COMPRESSION}${LEVEL:+_l$LEVEL}_${MODE}_x86"
 output_dir="$project_dir/output/tests/isolated/${TEST_DIR}/${test_name}_${SLURM_JOB_ID}"
 results_dir="$project_dir/results/tests/isolated/${TEST_DIR}/${test_name}_${SLURM_JOB_ID}"
 work_dir="$project_dir/tractoflow_files/work/tests/isolated/${TEST_DIR}/${test_name}_work_${SLURM_JOB_ID}"
@@ -164,6 +182,13 @@ trace_file="$output_dir/trace_${test_name}_${SLURM_JOB_ID}.txt"
 module load Java/11.0.20
 
 mkdir -p "$output_dir"
+
+# COMPRESSION_LEVEL overrides the level every tool asks compression_lib for
+if [[ -n "$LEVEL" ]]; then
+    level_config="$output_dir/compression_level.config"
+    printf 'env {\n    COMPRESSION_LEVEL = %s\n}\n' "$LEVEL" > "$level_config"
+    config_args+=(-c "$level_config")
+fi
 
 exec > "$output_dir/out_${SLURM_JOB_ID}.out" \
      2> "$output_dir/err_${SLURM_JOB_ID}.err"
@@ -202,7 +227,7 @@ fi
 echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "Dataset: $DATASET ($input_dir)"
 echo "Subjects: $subject_count"
-echo "Compression: $COMPRESSION"
+echo "Compression: $COMPRESSION${LEVEL:+ (level $LEVEL)}"
 echo "Mode: $MODE"
 echo "Node: $(hostname)"
 echo "Buffer lib: $(strings "$buffer_lib" | awk '/^[0-9a-f]{7}(-dirty)?$/ { v = $0 } END { print v ? v : "unknown" }') (md5 $(md5sum "$buffer_lib" | cut -d' ' -f1))"
