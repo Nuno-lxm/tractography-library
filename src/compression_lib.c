@@ -74,8 +74,10 @@ static stream_handle_t *streams[MAX_HANDLES];
 // A gz file opened for reading. The caller keeps zlib's own handle (real), so
 // any gz function not wrapped here still works on it. Small reads near the
 // start (headers) go to zlib; the first access past READ_LAZY_LIMIT
-// decompresses the whole file with libdeflate and serves it from memory
-enum { READ_LAZY, READ_LOADED, READ_ZLIB };
+// decompresses the whole file with libdeflate and serves it from memory.
+// Once a bulk read reaches the end the copy is freed (drained); going back
+// before the end rewinds zlib and starts over
+enum { READ_LAZY, READ_LOADED, READ_DRAINED, READ_ZLIB };
 
 typedef struct{
     gzFile real;
@@ -392,6 +394,21 @@ static z_off64_t zlib_tell(gzFile file){
     return original_gztell64(file);
 }
 
+static int zlib_rewind(gzFile file){
+    static original_gzrewind_t original_gzrewind = NULL;
+    if (!original_gzrewind) original_gzrewind = zlib_symbol("gzrewind");
+
+    return original_gzrewind(file);
+}
+
+static z_off64_t zlib_seek(gzFile file, z_off64_t offset){
+    static original_gzseek64_t original_gzseek64 = NULL;
+    if (!original_gzseek64) original_gzseek64 = zlib_symbol("gzseek64");
+    if (!original_gzseek64) original_gzseek64 = zlib_symbol("gzseek");
+
+    return original_gzseek64(file, offset, SEEK_SET);
+}
+
 // Decompress the whole file with libdeflate and serve it from memory from
 // zlib's current position on. Files that aren't a single gzip member
 // (plain, multi-member, corrupt) are left to zlib: returns -1
@@ -481,6 +498,26 @@ static int materialise(read_handle_t *r){
     return 0;
 }
 
+// A drained file needs its data again: rewind zlib, whose state is stale since
+// loading, and continue lazily from the same position
+static void reload(read_handle_t *r){
+    size_t target = r->pos;
+    r->state = READ_ZLIB;
+    if (zlib_rewind(r->real) < 0){
+        return;
+    }
+    r->state = READ_LAZY;
+    if (target <= READ_LAZY_LIMIT){
+        if (zlib_seek(r->real, target) < 0){
+            r->state = READ_ZLIB;
+        }
+        return;
+    }
+    if (materialise(r) == 0){
+        r->pos = target;
+    }
+}
+
 // The reader to serve an access of len bytes from memory, or NULL to let zlib
 // handle it. A lazy file is loaded once an access goes past READ_LAZY_LIMIT
 static read_handle_t *memory_reader(gzFile file, size_t len){
@@ -489,29 +526,44 @@ static read_handle_t *memory_reader(gzFile file, size_t len){
         return NULL;
     }
     read_handle_t *r = readers[slot];
+    if (r->state == READ_DRAINED && r->pos < r->size){
+        reload(r);
+    }
     if (r->state == READ_LAZY){
         z_off64_t pos = zlib_tell(file);
         if (pos >= 0 && (size_t)pos + len > READ_LAZY_LIMIT){
             materialise(r);
         }
     }
-    return r->state == READ_LOADED ? r : NULL;
+    return r->state == READ_LOADED || r->state == READ_DRAINED ? r : NULL;
 }
 
-// A reader that is already loaded, or NULL
+// A reader served from memory (loaded or drained), or NULL
 static read_handle_t *loaded_reader(gzFile file){
     int slot = find_reader(file);
-    return slot >= 0 && readers[slot]->state == READ_LOADED ? readers[slot] : NULL;
+    if (slot < 0){
+        return NULL;
+    }
+    int state = readers[slot]->state;
+    return state == READ_LOADED || state == READ_DRAINED ? readers[slot] : NULL;
 }
 
 static size_t read_memory(read_handle_t *r, void *buf, size_t len){
     size_t available = r->pos < r->size ? r->size - r->pos : 0;
     size_t n = len < available ? len : available;
-    memcpy(buf, r->data + r->pos, n);
-    r->pos += n;
+    if (n > 0){
+        memcpy(buf, r->data + r->pos, n);
+        r->pos += n;
+    }
     // Like zlib, eof is only set once a read asks for more than is left
     if (n < len){
         r->eof = 1;
+    }
+    // Tools read the image once into their own memory: drop our copy
+    if (r->state == READ_LOADED && r->pos >= r->size){
+        free(r->data);
+        r->data = NULL;
+        r->state = READ_DRAINED;
     }
     return n;
 }
@@ -616,8 +668,9 @@ int gzungetc(int c, gzFile file) {
     if (!r){
         return original_gzungetc(c, file);
     }
-    // The buffer is our own copy, so push back by overwriting the byte before pos
-    if (c < 0 || r->pos == 0 || r->pos > r->size){
+    // The buffer is our own copy, so push back by overwriting the byte before
+    // pos; not supported once drained
+    if (c < 0 || !r->data || r->pos == 0 || r->pos > r->size){
         return -1;
     }
     r->data[--r->pos] = (unsigned char)c;
@@ -639,12 +692,12 @@ static z_off64_t seek_gz(gzFile file, z_off64_t offset, int whence, original_gzs
     }
 
     read_handle_t *r = readers[slot];
-    z_off64_t current = r->state == READ_LOADED ? (z_off64_t)r->pos : zlib_tell(file);
+    z_off64_t current = r->state == READ_LAZY ? zlib_tell(file) : (z_off64_t)r->pos;
     z_off64_t target = whence == SEEK_SET ? offset : current + offset;
     if (r->state == READ_LAZY && target > READ_LAZY_LIMIT){
         materialise(r);
     }
-    if (r->state != READ_LOADED){
+    if (r->state != READ_LOADED && r->state != READ_DRAINED){
         return original_seek(file, offset, whence);
     }
     if (target < 0){
