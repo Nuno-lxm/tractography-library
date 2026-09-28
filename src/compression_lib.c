@@ -8,6 +8,7 @@
 #include <string.h>
 #include <libdeflate.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define MAX_HANDLES 64
 #define DEFAULT_LEVEL 6
@@ -28,6 +29,21 @@ typedef struct{
 
 static deflate_handle_t *handles[MAX_HANDLES];
 
+// Per-call prints only with COMPRESSION_DEBUG set; they cost a write to stderr each
+static int debug_enabled(void){
+    static int enabled = -1;
+    if (enabled < 0){
+        enabled = getenv("COMPRESSION_DEBUG") != NULL;
+    }
+    return enabled;
+}
+
+static double now(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
 static int find_handle(gzFile file){
     for (int i= 0; i < MAX_HANDLES; i++){
         if (handles[i] && (gzFile)handles[i] == file)
@@ -37,6 +53,10 @@ static int find_handle(gzFile file){
 }
 
 static int parse_level(const char *mode){
+    const char *env = getenv("COMPRESSION_LEVEL");
+    if (env && *env){
+        return atoi(env);
+    }
     for (; *mode; mode++){
         if (*mode >= '0' && *mode <= '9'){
             return *mode - '0';
@@ -88,7 +108,9 @@ gzFile gzopen(const char *path, const char *mode) {
     h->level= parse_level(mode);
     handles[slot] = h;
     
-    fprintf(stderr, "gzopen called for path: %s, mode: %s\n", path, mode);
+    if (debug_enabled()){
+        fprintf(stderr, "gzopen called for path: %s, mode: %s\n", path, mode);
+    }
     return (gzFile)h;
 }
 
@@ -120,7 +142,9 @@ int gzwrite(gzFile file, const void *buf, unsigned int len) {
     memcpy(h->data + h->size, buf, len);
     h->size += len;
 
-    fprintf(stderr, "gzwrite called for file: %p, buffer: %p, length: %u\n", (void*)file, buf, len);
+    if (debug_enabled()){
+        fprintf(stderr, "gzwrite called for file: %p, buffer: %p, length: %u\n", (void*)file, buf, len);
+    }
     return len;
 }
 
@@ -137,6 +161,7 @@ int gzclose(gzFile file) {
     deflate_handle_t *h = handles[slot];
     handles[slot] = NULL;
     int ret = Z_OK;
+    double start = now();
 
     struct libdeflate_compressor *compressor = libdeflate_alloc_compressor(h->level);
     size_t bound = libdeflate_gzip_compress_bound(compressor, h->size);
@@ -148,12 +173,18 @@ int gzclose(gzFile file) {
         ret = Z_ERRNO;
     }
 
+    // One summary line per file, always printed
+    fprintf(stderr, "compression_lib: level %d, %zu -> %zu bytes, %.2f s\n",
+        h->level, h->size, out_size, now() - start);
+
     libdeflate_free_compressor(compressor);
     free(out);
     free(h->data);
     close(h->fd);
     free(h);
-    
-    fprintf(stderr, "gzclose called for file: %p\n", (void*)file);
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzclose called for file: %p\n", (void*)file);
+    }
     return ret;
 }
