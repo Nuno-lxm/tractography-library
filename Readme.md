@@ -42,33 +42,29 @@ Produces `bin/buffer_lib.so`, `bin/logger.so`, `bin/test`.
 
 ## Config Files
 
-Nextflow config files for different environments are in `config-files/`:
+Nextflow config files are in `config-files/`:
 
 | Config | Environment | Purpose |
 |---|---|---|
-| `deucalion/buffer-deucalion.config` | Deucalion GPU | Buffer library, LD_PRELOAD + Singularity bind |
-| `deucalion/logger-deucalion.config` | Deucalion GPU | Logger library, LD_PRELOAD + Singularity bind |
-| `deucalion/bet-prelim-test.config` | Deucalion GPU | Buffer library limited to bet/maskfilter/mrcalc |
-| `deucalion/x86-base.config` | Deucalion x86 | Baseline config (queue size, no LD_PRELOAD) |
-| `deucalion/x86-buffer.config` | Deucalion x86 | Buffer library with x86 tuning |
+| `deucalion/base.config` | Deucalion | Loaded by every run: repo bind as `/mnt`, queue size, `maxForks`, `use_gpu` profile |
+| `deucalion/buffer.config` | Deucalion | Buffer library (`LD_PRELOAD`, targets, buffer sizes), layered after `base.config` |
 | `cloud/buffer-cloud.config` | Cloud | Buffer library for cloud environment |
 | `cloud/logger-cloud.config` | Cloud | Logger library for cloud environment |
 
-## Test Scripts
+The run scripts generate a small `run.config` per run for everything else
+(compression library, logger, prefetch-only, compression level and debug).
 
-Slurm batch scripts for running TractoFlow with the library are in `scripts/tests/`:
+## Run Scripts
 
-| Script | Dataset | Config | Arch |
-|---|---|---|---|
-| `test_buffer_mgh1.sh` | mgh1 (1 subject) | `buffer-deucalion.config` | GPU (a100-40) |
-| `test_buffer_penthera1.sh` | penthera1 (1 subject) | `buffer-deucalion.config` | GPU (a100-40) |
-| `test_buffer_penthera32.sh` | penthera32 (32 subjects) | `buffer-deucalion.config` | GPU (a100-40) |
-| `x86_full.sh` | Penthera_3T | `x86-base.config` | x86 (CPU-only) |
-| `x86_buf.sh` | Penthera_3T | `x86-buffer.config` | x86 (CPU-only) |
-| `x86_mgh_8.sh` | mgh8 (8 subjects) | `x86-base.config` | x86 (CPU-only) |
-| `x86_mgh_buf_8.sh` | mgh8 (8 subjects) | `x86-buffer.config` | x86 (CPU-only) |
+Slurm batch scripts for Deucalion. All take `--lib none|buffer|prefetch|deflate|deflate-py|logger`
+(see `scripts/lib/common.sh`, which they share):
 
-Baseline scripts (no LD_PRELOAD, for comparison) are in `scripts/baseline/` and `scripts/deucalion/baseline/`.
+| Script | What it runs |
+|---|---|
+| `scripts/tests/run_tractoflow.sh` | TractoFlow on x86, `--pipeline minimal` (default) or `full`, optional `--ssd` |
+| `scripts/tests/run_tractoflow_gpu.sh` | Same, on an A100 node with the `use_gpu` profile and GPU local tracking |
+| `scripts/isolated/run_isolated.sh` | One step on its own: `--step normalize\|extract_b0\|resample` |
+| `scripts/submit_series.sh` | Submits several variants of a run script, repeated and chained one after another |
 
 ## Usage
 
@@ -86,7 +82,8 @@ export BUFFER_FILE_TARGETS="*.nii,*.nii.gz"
 ```sh
 nextflow run main.nf \
     -with-singularity scilus_1.6.0.sif \
-    -c tractography-library/config-files/deucalion/buffer-deucalion.config \
+    -c tractography-library/config-files/deucalion/base.config \
+    -c tractography-library/config-files/deucalion/buffer.config \
     --input /path/to/data \
     --output_dir /path/to/results
 ```
