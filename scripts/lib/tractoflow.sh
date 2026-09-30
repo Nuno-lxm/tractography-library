@@ -28,7 +28,7 @@ check_lib_options
 case "$PIPELINE" in
     minimal)
         pipeline_args=(--run_dwi_denoising false --run_topup false --run_eddy false
-                       --run_resample_dwi false --run_t1_denoising false --run_resample_t1 false
+                       --run_t1_denoising false
                        --run_pft_tracking false --run_local_tracking false) ;;
     full)
         pipeline_args=(--run_pft_tracking false --run_eddy false) ;;

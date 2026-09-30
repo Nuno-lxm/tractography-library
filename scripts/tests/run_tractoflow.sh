@@ -20,7 +20,7 @@
 # --dataset NAME      data/NAME (required)
 # --pipeline minimal|full
 #                     minimal (default): preprocessing without denoising, topup,
-#                     eddy, resampling and tracking; full: everything but eddy
+#                     eddy and tracking; full: everything but eddy
 #                     and PFT tracking
 # --lib, --level, --debug
 #                     library options, see scripts/lib/common.sh
