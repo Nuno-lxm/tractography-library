@@ -2,12 +2,13 @@
 # runs a copy of the script from its spool dir, not from the repo.
 #
 # Library options (parsed by each script, checked by check_lib_options):
-#   --lib none|buffer|prefetch|deflate|deflate-py|logger
+#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|logger
 #       none        no library (baseline)
 #       buffer      buffer_lib, read prefetching and write buffering
 #       prefetch    buffer_lib, read prefetching only
 #       deflate     compression_lib, gzopen/gzwrite/gzclose through libdeflate
 #       deflate-py  deflate plus Python's raw deflate streams and crc32
+#       deflate-all deflate-py plus gz reads (FSL, MRtrix) decompressed with libdeflate
 #       logger      logger.so, logs every IO call to /mnt/logger.log
 #   --level N   deflate*: compress every image at libdeflate level N (0-12)
 #   --debug     deflate*: log every wrapped call
@@ -23,11 +24,11 @@ DEBUG=false
 
 check_lib_options() {
     case "$LIB" in
-        none|buffer|prefetch|deflate|deflate-py|logger) ;;
-        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py or logger (got: $LIB)" >&2; exit 1 ;;
+        none|buffer|prefetch|deflate|deflate-py|deflate-all|logger) ;;
+        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all or logger (got: $LIB)" >&2; exit 1 ;;
     esac
     if [[ "$LIB" != deflate* ]] && [[ -n "$LEVEL" || "$DEBUG" == true ]]; then
-        echo "Error: --level and --debug only work with --lib deflate or deflate-py" >&2
+        echo "Error: --level and --debug only work with the deflate modes" >&2
         exit 1
     fi
     if [[ -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); }; then
@@ -59,7 +60,8 @@ add_lib_configs() {
         deflate*)   env+=("LD_PRELOAD = '/mnt/bin/compression_lib.so'") ;;
         logger)     env+=("LD_PRELOAD = '/mnt/bin/logger.so'") ;;
     esac
-    [[ "$LIB" == deflate-py ]] && env+=("COMPRESSION_STREAMS = 1")
+    [[ "$LIB" == deflate-py || "$LIB" == deflate-all ]] && env+=("COMPRESSION_STREAMS = 1")
+    [[ "$LIB" == deflate-all ]] && env+=("COMPRESSION_READS = 1")
     [[ "$DEBUG" == true ]]     && env+=("COMPRESSION_DEBUG = 1")
     [[ -n "$LEVEL" ]]          && env+=("COMPRESSION_LEVEL = $LEVEL")
     if (( ${#env[@]} > 0 )); then
@@ -126,10 +128,11 @@ print_summary() {
             name=$(sed -n 's/^# NEXTFLOW TASK: \([^ ]*\).*/\1/p' "$(dirname "$err")/.command.run")
             grep '^compression_lib:' "$err" | sed "s/^/$name /" || true
         done | awk '{
-                for (i = 1; i <= NF; i++) if ($i == "->") { bin[$1] += $(i - 1); bout[$1] += $(i + 1) }
-                files[$1]++; secs[$1] += $(NF - 1)
+                p = $3 == "read" ? $1 " (reads)" : $1
+                for (i = 1; i <= NF; i++) if ($i == "->") { bin[p] += $(i - 1); bout[p] += $(i + 1) }
+                files[p]++; secs[p] += $(NF - 1)
             }
-            END { for (p in files) printf "  %-30s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
+            END { for (p in files) printf "  %-38s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
     fi
 
     find "$work_dir" -type f \( -name '*.nii' -o -name '*.nii.gz' \) -printf '%s\n' |
