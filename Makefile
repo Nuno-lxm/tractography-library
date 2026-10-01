@@ -35,6 +35,10 @@ test_gz_read: tests/test_gz_read.c | bin
 ZSTD_CFLAGS =
 ZSTD_LIBS = -lzstd
 
+# Same zstd overrides as bench_compression when built in the container
+zstd_lib.so: $(SRC_DIR)/zstd_lib.c | bin
+	gcc -shared -fPIC -Wall -O2 $(ZSTD_CFLAGS) -o $(BIN_DIR)/zstd_lib.so $(SRC_DIR)/zstd_lib.c -ldl $(ZSTD_LIBS)
+
 bench_compression: tests/bench_compression.c | bin
 	gcc -Wall -O2 $(ZSTD_CFLAGS) -o $(BIN_DIR)/bench_compression tests/bench_compression.c -lz -ldeflate $(ZSTD_LIBS)
 

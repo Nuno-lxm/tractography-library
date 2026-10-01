@@ -22,7 +22,7 @@
 #                     minimal (default): preprocessing without denoising, topup,
 #                     eddy and tracking; full: everything but eddy
 #                     and PFT tracking
-# --lib, --level, --debug
+# --lib, --level, --debug, --zstd-targets
 #                     library options, see scripts/lib/common.sh
 # --ssd               copy the input, container and TractoFlow to the node's
 #                     /tmp and run from there

@@ -2,16 +2,24 @@
 # runs a copy of the script from its spool dir, not from the repo.
 #
 # Library options (parsed by each script, checked by check_lib_options):
-#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|logger
+#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zstd|logger
 #       none        no library (baseline)
 #       buffer      buffer_lib, read prefetching and write buffering
 #       prefetch    buffer_lib, read prefetching only
 #       deflate     compression_lib, gzopen/gzwrite/gzclose through libdeflate
 #       deflate-py  deflate plus Python's raw deflate streams and crc32
 #       deflate-all deflate-py plus gz reads (FSL, MRtrix) decompressed with libdeflate
+#       zstd        zstd_lib, gz writes to the --zstd-targets files become zstd
+#                   (still named .gz); any zstd file read through gzopen is
+#                   decompressed. Only list files read by gzopen tools (FSL,
+#                   MRtrix): Python and ANTs can't read them
 #       logger      logger.so, logs every IO call to /mnt/logger.log
 #   --level N   deflate*: compress every image at libdeflate level N (0-12)
-#   --debug     deflate*: log every wrapped call
+#               zstd: zstd level N (1-19, default 3)
+#   --debug     deflate*, zstd: log every wrapped call
+#   --zstd-targets GLOBS
+#               zstd: files to write as zstd, as ZSTD_FILE_TARGETS (globs
+#               separated by commas; a pattern with a / matches the full path)
 
 project_dir="/projects/I20240002/nunolxm"
 lib_dir="$project_dir/tractography-library"
@@ -21,18 +29,31 @@ sif="$project_dir/tractoflow_files/scilus_1.6.0.sif"
 LIB="none"
 LEVEL=""
 DEBUG=false
+ZSTD_TARGETS=""
 
 check_lib_options() {
     case "$LIB" in
-        none|buffer|prefetch|deflate|deflate-py|deflate-all|logger) ;;
-        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all or logger (got: $LIB)" >&2; exit 1 ;;
+        none|buffer|prefetch|deflate|deflate-py|deflate-all|zstd|logger) ;;
+        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zstd or logger (got: $LIB)" >&2; exit 1 ;;
     esac
-    if [[ "$LIB" != deflate* ]] && [[ -n "$LEVEL" || "$DEBUG" == true ]]; then
-        echo "Error: --level and --debug only work with the deflate modes" >&2
+    if [[ "$LIB" != deflate* && "$LIB" != zstd ]] && [[ -n "$LEVEL" || "$DEBUG" == true ]]; then
+        echo "Error: --level and --debug only work with the deflate and zstd modes" >&2
         exit 1
     fi
-    if [[ -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); }; then
-        echo "Error: --level must be 0-12 (got: $LEVEL)" >&2
+    if [[ "$LIB" == deflate* && -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); }; then
+        echo "Error: --level must be 0-12 for deflate (got: $LEVEL)" >&2
+        exit 1
+    fi
+    if [[ "$LIB" == zstd && -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL < 1 || LEVEL > 19 )); }; then
+        echo "Error: --level must be 1-19 for zstd (got: $LEVEL)" >&2
+        exit 1
+    fi
+    if [[ "$LIB" == zstd && -z "$ZSTD_TARGETS" ]]; then
+        echo "Error: --lib zstd needs --zstd-targets (no step default)" >&2
+        exit 1
+    fi
+    if [[ "$LIB" != zstd && -n "$ZSTD_TARGETS" ]]; then
+        echo "Error: --zstd-targets only works with --lib zstd" >&2
         exit 1
     fi
 }
@@ -58,12 +79,18 @@ add_lib_configs() {
         buffer)     config_args+=(-c "$config_dir/buffer.config") ;;
         prefetch)   config_args+=(-c "$config_dir/buffer.config"); env+=("BUFFER_WRITE_ENABLED = 0") ;;
         deflate*)   env+=("LD_PRELOAD = '/mnt/bin/compression_lib.so'") ;;
+        zstd)       env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so'" "ZSTD_FILE_TARGETS = '$ZSTD_TARGETS'") ;;
         logger)     env+=("LD_PRELOAD = '/mnt/bin/logger.so'") ;;
     esac
     [[ "$LIB" == deflate-py || "$LIB" == deflate-all ]] && env+=("COMPRESSION_STREAMS = 1")
     [[ "$LIB" == deflate-all ]] && env+=("COMPRESSION_READS = 1")
-    [[ "$DEBUG" == true ]]     && env+=("COMPRESSION_DEBUG = 1")
-    [[ -n "$LEVEL" ]]          && env+=("COMPRESSION_LEVEL = $LEVEL")
+    if [[ "$LIB" == zstd ]]; then
+        [[ "$DEBUG" == true ]] && env+=("ZSTD_DEBUG = 1")
+        [[ -n "$LEVEL" ]]      && env+=("ZSTD_LEVEL = $LEVEL")
+    else
+        [[ "$DEBUG" == true ]] && env+=("COMPRESSION_DEBUG = 1")
+        [[ -n "$LEVEL" ]]      && env+=("COMPRESSION_LEVEL = $LEVEL")
+    fi
     if (( ${#env[@]} > 0 )); then
         { echo "env {"; printf '    %s\n' "${env[@]}"; echo "}"; } > "$output_dir/run.config"
         config_args+=(-c "$output_dir/run.config")
@@ -101,6 +128,7 @@ print_lib_version() {
     case "$LIB" in
         buffer|prefetch) so="$lib_dir/bin/buffer_lib.so" ;;
         deflate*)        so="$lib_dir/bin/compression_lib.so" ;;
+        zstd)            so="$lib_dir/bin/zstd_lib.so" ;;
         logger)          so="$lib_dir/bin/logger.so" ;;
         *)               return ;;
     esac
@@ -118,7 +146,7 @@ print_summary() {
     task_run=$(find "$work_dir" -name .command.run -print -quit)
     if [[ -n "$task_run" ]]; then
         echo "Task env ($task_run):"
-        grep -E '^export (LD_PRELOAD|BUFFER_|COMPRESSION_)' "$task_run" || echo "  (no library settings)"
+        grep -E '^export (LD_PRELOAD|BUFFER_|COMPRESSION_|ZSTD_)' "$task_run" || echo "  (no library settings)"
     fi
 
     if [[ "$LIB" == deflate* ]]; then
@@ -133,6 +161,25 @@ print_summary() {
                 files[p]++; secs[p] += $(NF - 1)
             }
             END { for (p in files) printf "  %-38s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
+    fi
+
+    if [[ "$LIB" == zstd ]]; then
+        echo "zstd_lib per process (files, GB in -> out, seconds):"
+        local err name
+        for err in $(find "$work_dir" -name .command.err); do
+            name=$(sed -n 's/^# NEXTFLOW TASK: \([^ ]*\).*/\1/p' "$(dirname "$err")/.command.run")
+            grep '^zstd_lib: \(level\|read,\)' "$err" | sed "s/^/$name /" || true
+        done | awk '{
+                p = $3 == "read," ? $1 " (reads)" : $1
+                for (i = 1; i <= NF; i++) if ($i == "->") { bin[p] += $(i - 1); bout[p] += $(i + 1) }
+                files[p]++; secs[p] += $(NF - 1)
+            }
+            END { for (p in files) printf "  %-38s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
+        # Failed zstd reads/writes; the task itself fails too
+        find "$work_dir" -name .command.err -exec grep -H "^zstd_lib: can't\|^zstd_lib: compress failed" {} + || true
+        echo "Files written as zstd in work dir:"
+        find "$work_dir" -type f -name '*.gz' -exec sh -c \
+            'head -c 4 "$1" | od -An -tx1 | grep -q "28 b5 2f fd" && printf "  %s\n" "$1"' _ {} \; || true
     fi
 
     find "$work_dir" -type f \( -name '*.nii' -o -name '*.nii.gz' \) -printf '%s\n' |

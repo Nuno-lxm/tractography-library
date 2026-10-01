@@ -16,6 +16,7 @@
 #   sbatch run_isolated.sh --step normalize --dataset mgh1 --lib prefetch
 #   sbatch run_isolated.sh --step resample --dataset mgh1 --lib deflate-py --level 1
 #   sbatch run_isolated.sh --step resample --dataset mgh1 --nii
+#   sbatch run_isolated.sh --step resample --dataset mgh1 --lib zstd --debug
 #
 # --step normalize|extract_b0|resample   (required)
 # --dataset NAME      (required) input under data/<step dir>/NAME:
@@ -23,8 +24,10 @@
 #                       extract_b0  data/extract_b0/     (dwi, bval, bvec)
 #                       resample    data/resample_dwi/   (dwi, mask), or
 #                                   data/resample_dwi_nii/ with --nii
-# --lib, --level, --debug
-#                     library options, see scripts/lib/common.sh
+# --lib, --level, --debug, --zstd-targets
+#                     library options, see scripts/lib/common.sh. With --lib
+#                     zstd and --step resample, --zstd-targets defaults to the
+#                     fslmaths output that mrcalc reads back
 # --nii               resample: uncompressed .nii in and out
 # --publish           resample: copy the resampled DWI to results (~6 GB each)
 # --test-dir NAME     put output, results and work under tests/isolated/NAME
@@ -48,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --lib)        LIB="$2"; shift 2 ;;
         --level)      LEVEL="$2"; shift 2 ;;
         --debug)      DEBUG=true; shift ;;
+        --zstd-targets) ZSTD_TARGETS="$2"; shift 2 ;;
         --nii)        NII=true; shift ;;
         --publish)    PUBLISH=true; shift ;;
         --test-dir)   TEST_DIR="$2"; shift 2 ;;
@@ -58,8 +62,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$STEP" || -z "$DATASET" ]]; then
-    echo "Usage: sbatch $0 --step normalize|extract_b0|resample --dataset NAME [--lib MODE] [--level N] [--debug] [--nii] [--publish]" >&2
+    echo "Usage: sbatch $0 --step normalize|extract_b0|resample --dataset NAME [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--nii] [--publish]" >&2
     exit 1
+fi
+# Intermediate written by fslmaths (gzopen) and only read by mrcalc (gzopen);
+# the final output stays gzip
+if [[ "$LIB" == zstd && "$STEP" == resample && -z "$ZSTD_TARGETS" ]]; then
+    ZSTD_TARGETS="dwi_resample_clipped.nii.gz"
 fi
 check_lib_options
 
