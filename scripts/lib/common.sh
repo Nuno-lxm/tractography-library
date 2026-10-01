@@ -2,13 +2,14 @@
 # runs a copy of the script from its spool dir, not from the repo.
 #
 # Library options (parsed by each script, checked by check_lib_options):
-#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zstd|logger
+#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|logger
 #       none        no library (baseline)
 #       buffer      buffer_lib, read prefetching and write buffering
 #       prefetch    buffer_lib, read prefetching only
 #       deflate     compression_lib, gzopen/gzwrite/gzclose through libdeflate
 #       deflate-py  deflate plus Python's raw deflate streams and crc32
 #       deflate-all deflate-py plus gz reads (FSL, MRtrix) decompressed with libdeflate
+#       zlib-ng     zlib-ng built as a drop-in libz.so.1 (scripts/isolated/build_zlib_ng.sh)
 #       zstd        zstd_lib, gz writes to the --zstd-targets files become zstd
 #                   (still named .gz); any zstd file read through gzopen is
 #                   decompressed. Only list files read by gzopen tools (FSL,
@@ -33,8 +34,8 @@ ZSTD_TARGETS=""
 
 check_lib_options() {
     case "$LIB" in
-        none|buffer|prefetch|deflate|deflate-py|deflate-all|zstd|logger) ;;
-        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zstd or logger (got: $LIB)" >&2; exit 1 ;;
+        none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|logger) ;;
+        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zlib-ng, zstd or logger (got: $LIB)" >&2; exit 1 ;;
     esac
     if [[ "$LIB" != deflate* && "$LIB" != zstd ]] && [[ -n "$LEVEL" || "$DEBUG" == true ]]; then
         echo "Error: --level and --debug only work with the deflate and zstd modes" >&2
@@ -79,6 +80,7 @@ add_lib_configs() {
         buffer)     config_args+=(-c "$config_dir/buffer.config") ;;
         prefetch)   config_args+=(-c "$config_dir/buffer.config"); env+=("BUFFER_WRITE_ENABLED = 0") ;;
         deflate*)   env+=("LD_PRELOAD = '/mnt/bin/compression_lib.so'") ;;
+        zlib-ng)    env+=("LD_PRELOAD = '/mnt/bin/zlib-ng/libz.so.1'") ;;
         zstd)       env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so'" "ZSTD_FILE_TARGETS = '$ZSTD_TARGETS'") ;;
         logger)     env+=("LD_PRELOAD = '/mnt/bin/logger.so'") ;;
     esac
@@ -128,6 +130,7 @@ print_lib_version() {
     case "$LIB" in
         buffer|prefetch) so="$lib_dir/bin/buffer_lib.so" ;;
         deflate*)        so="$lib_dir/bin/compression_lib.so" ;;
+        zlib-ng)         so="$lib_dir/bin/zlib-ng/libz.so.1" ;;
         zstd)            so="$lib_dir/bin/zstd_lib.so" ;;
         logger)          so="$lib_dir/bin/logger.so" ;;
         *)               return ;;
