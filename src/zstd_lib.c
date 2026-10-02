@@ -14,6 +14,10 @@
 #include <zlib.h>
 #include <zstd.h>
 
+// zlib.h makes gzgetc a macro that reads the handle's fields directly; the
+// library defines the real function instead
+#undef gzgetc
+
 #define MAX_HANDLES 64
 
 
@@ -21,13 +25,23 @@ typedef gzFile (*original_gzopen_t)(const char *path, const char *mode);
 typedef int (*original_gzwrite_t)(gzFile file, const void *buf, unsigned int len);
 typedef int (*original_gzread_t)(gzFile file, voidp buf, unsigned len);
 typedef int (*original_gzclose_t)(gzFile file);
+typedef z_off_t (*original_gzseek_t)(gzFile file, z_off_t offset, int whence);
+typedef z_off64_t (*original_gzseek64_t)(gzFile file, z_off64_t offset, int whence);
+typedef z_off_t (*original_gztell_t)(gzFile file);
+typedef z_off64_t (*original_gztell64_t)(gzFile file);
+typedef int (*original_gzeof_t)(gzFile file);
+typedef const char *(*original_gzerror_t)(gzFile file, int *errnum);
+typedef int (*original_gzgetc_t)(gzFile file);
 
 
 // A gz file taken over from zlib. Writing: everything is buffered in data and
 // compressed with zstd in one go at gzclose. Reading (only files that are
-// already zstd): the whole file is decompressed into data at gzopen
+// already zstd): the whole file is decompressed into data at gzopen.
+// writing comes first: zlib's gzgetc macro reads the first field as its count
+// of buffered bytes, and 0 sends a read handle to the gzgetc function
 typedef struct{
     int writing;
+    int eof;
     int fd;
     int level;
     unsigned char *data;
@@ -105,6 +119,25 @@ static int free_slot(void){
             return i;
     }
     return -1;
+}
+
+// Makes room for len more bytes in a write handle's buffer
+static int grow(zstd_handle_t *h, size_t len){
+    if (h->size + len <= h->capacity){
+        return 0;
+    }
+    size_t new_capacity = h->capacity ? h->capacity : 65536;
+    while (new_capacity < h->size + len){
+        new_capacity *= 2;
+    }
+    unsigned char *new_data = realloc(h->data, new_capacity);
+    if (!new_data){
+        perror("realloc");
+        return -1;
+    }
+    h->data = new_data;
+    h->capacity = new_capacity;
+    return 0;
 }
 
 static int write_all(int fd, const void *buf, size_t len){
@@ -325,18 +358,8 @@ int gzwrite(gzFile file, const void *buf, unsigned int len) {
         return 0;
     }
 
-    if (h->size + len > h->capacity){
-        size_t new_capacity = h->capacity ? h->capacity : 65536;
-        while (new_capacity < h->size + len){
-            new_capacity *= 2;
-        }
-        unsigned char *new_data = realloc(h->data, new_capacity);
-        if (!new_data){
-            perror("realloc");
-            return 0; /* gzwrite returns 0 on error */
-        }
-        h->data = new_data;
-        h->capacity = new_capacity;
+    if (grow(h, len) < 0){
+        return 0; /* gzwrite returns 0 on error */
     }
 
     memcpy(h->data + h->size, buf, len);
@@ -359,12 +382,14 @@ int gzread(gzFile file, voidp buf, unsigned len) {
         got = -1;
     } else{
         // gzread returns an int, so serve at most INT_MAX per call
+        // pos can be past the end after a gzseek
         zstd_handle_t *h = handles[slot];
-        size_t n = h->size - h->pos;
+        size_t n = h->pos < h->size ? h->size - h->pos : 0;
         if (n > len) n = len;
         if (n > INT_MAX) n = INT_MAX;
         memcpy(buf, h->data + h->pos, n);
         h->pos += n;
+        if (n < len) h->eof = 1;
         got = n;
     }
 
@@ -372,6 +397,146 @@ int gzread(gzFile file, voidp buf, unsigned len) {
         fprintf(stderr, "gzread: %p, asked %u, got %d\n", (void*)file, len, got);
     }
     return got;
+}
+
+// Like zlib, -1 at the end of the data
+static int getc_handle(gzFile file, original_gzgetc_t original){
+    int slot = find_handle(file);
+    if (slot < 0){
+        return original(file);
+    }
+    zstd_handle_t *h = handles[slot];
+    if (h->writing){
+        return -1;
+    }
+    if (h->pos >= h->size){
+        h->eof = 1;
+        return -1;
+    }
+    return h->data[h->pos++];
+}
+
+int gzgetc(gzFile file) {
+    static original_gzgetc_t original_gzgetc = NULL;
+    if (!original_gzgetc) original_gzgetc = dlsym(RTLD_NEXT, "gzgetc");
+
+    return getc_handle(file, original_gzgetc);
+}
+
+// Older name for gzgetc, still exported by zlib
+int gzgetc_(gzFile file) {
+    static original_gzgetc_t original_gzgetc_ = NULL;
+    if (!original_gzgetc_) original_gzgetc_ = dlsym(RTLD_NEXT, "gzgetc_");
+
+    return getc_handle(file, original_gzgetc_);
+}
+
+
+/* Seek and state */
+
+// Same rules as zlib: no SEEK_END, reads can move anywhere at or after the
+// start, writes only forward (the gap is filled with zeros). Returns the new
+// offset in the uncompressed data, or -1
+static z_off64_t seek_handle(zstd_handle_t *h, z_off64_t offset, int whence){
+    z_off64_t current = h->writing ? (z_off64_t)h->size : (z_off64_t)h->pos;
+    if (whence == SEEK_CUR){
+        offset += current;
+    } else if (whence != SEEK_SET){
+        return -1;
+    }
+    if (offset < 0){
+        return -1;
+    }
+
+    if (h->writing){
+        if (offset < current){
+            return -1;
+        }
+        size_t gap = offset - current;
+        if (grow(h, gap) < 0){
+            return -1;
+        }
+        memset(h->data + h->size, 0, gap);
+        h->size += gap;
+    } else{
+        h->pos = offset;
+        h->eof = 0;
+    }
+    return offset;
+}
+
+z_off_t gzseek(gzFile file, z_off_t offset, int whence) {
+    static original_gzseek_t original_gzseek = NULL;
+    if (!original_gzseek) original_gzseek = dlsym(RTLD_NEXT, "gzseek");
+
+    int slot = find_handle(file);
+    z_off_t ret = slot < 0 ? original_gzseek(file, offset, whence) : (z_off_t)seek_handle(handles[slot], offset, whence);
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzseek: %p, %lld whence %d -> %lld\n", (void*)file, (long long)offset, whence, (long long)ret);
+    }
+    return ret;
+}
+
+z_off64_t gzseek64(gzFile file, z_off64_t offset, int whence) {
+    static original_gzseek64_t original_gzseek64 = NULL;
+    if (!original_gzseek64) original_gzseek64 = dlsym(RTLD_NEXT, "gzseek64");
+
+    int slot = find_handle(file);
+    z_off64_t ret = slot < 0 ? original_gzseek64(file, offset, whence) : seek_handle(handles[slot], offset, whence);
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzseek64: %p, %lld whence %d -> %lld\n", (void*)file, (long long)offset, whence, (long long)ret);
+    }
+    return ret;
+}
+
+z_off_t gztell(gzFile file) {
+    static original_gztell_t original_gztell = NULL;
+    if (!original_gztell) original_gztell = dlsym(RTLD_NEXT, "gztell");
+
+    int slot = find_handle(file);
+    if (slot < 0){
+        return original_gztell(file);
+    }
+    zstd_handle_t *h = handles[slot];
+    return h->writing ? (z_off_t)h->size : (z_off_t)h->pos;
+}
+
+z_off64_t gztell64(gzFile file) {
+    static original_gztell64_t original_gztell64 = NULL;
+    if (!original_gztell64) original_gztell64 = dlsym(RTLD_NEXT, "gztell64");
+
+    int slot = find_handle(file);
+    if (slot < 0){
+        return original_gztell64(file);
+    }
+    zstd_handle_t *h = handles[slot];
+    return h->writing ? (z_off64_t)h->size : (z_off64_t)h->pos;
+}
+
+// Like zlib, set only once a read has asked for more than was left
+int gzeof(gzFile file) {
+    static original_gzeof_t original_gzeof = NULL;
+    if (!original_gzeof) original_gzeof = dlsym(RTLD_NEXT, "gzeof");
+
+    int slot = find_handle(file);
+    return slot < 0 ? original_gzeof(file) : handles[slot]->eof;
+}
+
+// Errors on the library's handles are reported by the call that fails, so
+// there's never one pending here
+const char *gzerror(gzFile file, int *errnum) {
+    static original_gzerror_t original_gzerror = NULL;
+    if (!original_gzerror) original_gzerror = dlsym(RTLD_NEXT, "gzerror");
+
+    if (find_handle(file) < 0){
+        return original_gzerror(file, errnum);
+    }
+    if (errnum){
+        *errnum = Z_OK;
+    }
+    return "";
 }
 
 
