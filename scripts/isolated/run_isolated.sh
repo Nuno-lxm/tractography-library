@@ -25,8 +25,8 @@
 #                       resample    data/resample_dwi/   (dwi, mask), or
 #                                   data/resample_dwi_nii/ with --nii
 # --lib, --level, --debug, --zstd-targets
-#                     library options, see scripts/lib/common.sh. With --lib
-#                     zstd and --step resample, --zstd-targets defaults to the
+#                     library options, see scripts/lib/common.sh. With the
+#                     zstd modes and --step resample, --zstd-targets defaults to the
 #                     fslmaths output that mrcalc reads back
 # --nii               resample: uncompressed .nii in and out
 # --publish           resample: copy the resampled DWI to results (~6 GB each)
@@ -67,7 +67,7 @@ if [[ -z "$STEP" || -z "$DATASET" ]]; then
 fi
 # Intermediate written by fslmaths (gzopen) and only read by mrcalc (gzopen);
 # the final output stays gzip
-if [[ "$LIB" == zstd && "$STEP" == resample && -z "$ZSTD_TARGETS" ]]; then
+if [[ "$LIB" == zstd* && "$STEP" == resample && -z "$ZSTD_TARGETS" ]]; then
     ZSTD_TARGETS="dwi_resample_clipped.nii.gz"
 fi
 check_lib_options

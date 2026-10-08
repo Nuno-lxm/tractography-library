@@ -2,7 +2,7 @@
 # runs a copy of the script from its spool dir, not from the repo.
 #
 # Library options (parsed by each script, checked by check_lib_options):
-#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|logger
+#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|logger
 #       none        no library (baseline)
 #       buffer      buffer_lib, read prefetching and write buffering
 #       prefetch    buffer_lib, read prefetching only
@@ -14,12 +14,17 @@
 #                   (still named .gz); any zstd file read through gzopen is
 #                   decompressed. Only list files read by gzopen tools (FSL,
 #                   MRtrix): Python and ANTs can't read them
+#       zstd-deflate-py zstd for the --zstd-targets files, deflate-py for every
+#                   other gz write and Python's streams
 #       logger      logger.so, logs every IO call to /mnt/logger.log
-#   --level N   deflate*: compress every image at libdeflate level N (0-12)
+#   --level N   deflate*, zstd-deflate-py: compress every image at libdeflate
+#               level N (0-12); the zstd targets stay at zstd's default
 #               zstd: zstd level N (1-19, default 3)
-#   --debug     deflate*, zstd: log every wrapped call
+#               zlib-ng: default level N (1-9), from the build at
+#               bin/zlib-ng-lN (scripts/isolated/build_zlib_ng.sh N)
+#   --debug     deflate*, zstd*: log every wrapped call
 #   --zstd-targets GLOBS
-#               zstd: files to write as zstd, as ZSTD_FILE_TARGETS (globs
+#               zstd*: files to write as zstd, as ZSTD_FILE_TARGETS (globs
 #               separated by commas; a pattern with a / matches the full path)
 
 project_dir="/projects/I20240002/nunolxm"
@@ -34,27 +39,35 @@ ZSTD_TARGETS=""
 
 check_lib_options() {
     case "$LIB" in
-        none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|logger) ;;
-        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zlib-ng, zstd or logger (got: $LIB)" >&2; exit 1 ;;
+        none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|logger) ;;
+        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zlib-ng, zstd, zstd-deflate-py or logger (got: $LIB)" >&2; exit 1 ;;
     esac
-    if [[ "$LIB" != deflate* && "$LIB" != zstd ]] && [[ -n "$LEVEL" || "$DEBUG" == true ]]; then
-        echo "Error: --level and --debug only work with the deflate and zstd modes" >&2
+    if [[ "$LIB" != deflate* && "$LIB" != zstd* && "$DEBUG" == true ]]; then
+        echo "Error: --debug only works with the deflate and zstd modes" >&2
         exit 1
     fi
-    if [[ "$LIB" == deflate* && -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); }; then
-        echo "Error: --level must be 0-12 for deflate (got: $LEVEL)" >&2
+    if [[ "$LIB" != deflate* && "$LIB" != zstd* && "$LIB" != zlib-ng && -n "$LEVEL" ]]; then
+        echo "Error: --level only works with the deflate, zstd and zlib-ng modes" >&2
+        exit 1
+    fi
+    if [[ "$LIB" == deflate* || "$LIB" == zstd-deflate-py ]] && [[ -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL > 12 )); }; then
+        echo "Error: --level must be 0-12 for libdeflate (got: $LEVEL)" >&2
         exit 1
     fi
     if [[ "$LIB" == zstd && -n "$LEVEL" ]] && { ! [[ "$LEVEL" =~ ^[0-9]+$ ]] || (( LEVEL < 1 || LEVEL > 19 )); }; then
         echo "Error: --level must be 1-19 for zstd (got: $LEVEL)" >&2
         exit 1
     fi
-    if [[ "$LIB" == zstd && -z "$ZSTD_TARGETS" ]]; then
-        echo "Error: --lib zstd needs --zstd-targets (no step default)" >&2
+    if [[ "$LIB" == zlib-ng && -n "$LEVEL" ]] && ! [[ "$LEVEL" =~ ^[1-9]$ ]]; then
+        echo "Error: --level must be 1-9 for zlib-ng (got: $LEVEL)" >&2
         exit 1
     fi
-    if [[ "$LIB" != zstd && -n "$ZSTD_TARGETS" ]]; then
-        echo "Error: --zstd-targets only works with --lib zstd" >&2
+    if [[ "$LIB" == zstd* && -z "$ZSTD_TARGETS" ]]; then
+        echo "Error: --lib $LIB needs --zstd-targets (no step default)" >&2
+        exit 1
+    fi
+    if [[ "$LIB" != zstd* && -n "$ZSTD_TARGETS" ]]; then
+        echo "Error: --zstd-targets only works with the zstd modes" >&2
         exit 1
     fi
 }
@@ -80,18 +93,23 @@ add_lib_configs() {
         buffer)     config_args+=(-c "$config_dir/buffer.config") ;;
         prefetch)   config_args+=(-c "$config_dir/buffer.config"); env+=("BUFFER_WRITE_ENABLED = 0") ;;
         deflate*)   env+=("LD_PRELOAD = '/mnt/bin/compression_lib.so'") ;;
-        zlib-ng)    env+=("LD_PRELOAD = '/mnt/bin/zlib-ng/libz.so.1'") ;;
-        zstd)       env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so'" "ZSTD_FILE_TARGETS = '$ZSTD_TARGETS'") ;;
+        zlib-ng)    env+=("LD_PRELOAD = '/mnt/bin/zlib-ng${LEVEL:+-l$LEVEL}/libz.so.1'") ;;
+        zstd)       env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so'") ;;
+        # zstd_lib first: it hands every gz call it doesn't take to compression_lib.
+        # Colon, not space: Nextflow re-exports the env unquoted in the container
+        zstd-deflate-py) env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so:/mnt/bin/compression_lib.so'") ;;
         logger)     env+=("LD_PRELOAD = '/mnt/bin/logger.so'") ;;
     esac
-    [[ "$LIB" == deflate-py || "$LIB" == deflate-all ]] && env+=("COMPRESSION_STREAMS = 1")
+    [[ "$LIB" == zstd* ]] && env+=("ZSTD_FILE_TARGETS = '$ZSTD_TARGETS'")
+    [[ "$LIB" == deflate-py || "$LIB" == deflate-all || "$LIB" == zstd-deflate-py ]] && env+=("COMPRESSION_STREAMS = 1")
     [[ "$LIB" == deflate-all ]] && env+=("COMPRESSION_READS = 1")
-    if [[ "$LIB" == zstd ]]; then
-        [[ "$DEBUG" == true ]] && env+=("ZSTD_DEBUG = 1")
-        [[ -n "$LEVEL" ]]      && env+=("ZSTD_LEVEL = $LEVEL")
-    else
-        [[ "$DEBUG" == true ]] && env+=("COMPRESSION_DEBUG = 1")
-        [[ -n "$LEVEL" ]]      && env+=("COMPRESSION_LEVEL = $LEVEL")
+    if [[ "$DEBUG" == true ]]; then
+        [[ "$LIB" == zstd* ]] && env+=("ZSTD_DEBUG = 1")
+        [[ "$LIB" == deflate* || "$LIB" == zstd-deflate-py ]] && env+=("COMPRESSION_DEBUG = 1")
+    fi
+    if [[ -n "$LEVEL" ]]; then
+        [[ "$LIB" == zstd ]]     && env+=("ZSTD_LEVEL = $LEVEL")
+        [[ "$LIB" == deflate* || "$LIB" == zstd-deflate-py ]] && env+=("COMPRESSION_LEVEL = $LEVEL")
     fi
     if (( ${#env[@]} > 0 )); then
         { echo "env {"; printf '    %s\n' "${env[@]}"; echo "}"; } > "$output_dir/run.config"
@@ -126,20 +144,23 @@ stop_monitoring() {
 
 # Prints which build of the loaded library this run uses
 print_lib_version() {
-    local so=""
+    local sos=() so
     case "$LIB" in
-        buffer|prefetch) so="$lib_dir/bin/buffer_lib.so" ;;
-        deflate*)        so="$lib_dir/bin/compression_lib.so" ;;
-        zlib-ng)         so="$lib_dir/bin/zlib-ng/libz.so.1" ;;
-        zstd)            so="$lib_dir/bin/zstd_lib.so" ;;
-        logger)          so="$lib_dir/bin/logger.so" ;;
+        buffer|prefetch) sos=("$lib_dir/bin/buffer_lib.so") ;;
+        deflate*)        sos=("$lib_dir/bin/compression_lib.so") ;;
+        zlib-ng)         sos=("$lib_dir/bin/zlib-ng${LEVEL:+-l$LEVEL}/libz.so.1") ;;
+        zstd)            sos=("$lib_dir/bin/zstd_lib.so") ;;
+        zstd-deflate-py) sos=("$lib_dir/bin/zstd_lib.so" "$lib_dir/bin/compression_lib.so") ;;
+        logger)          sos=("$lib_dir/bin/logger.so") ;;
         *)               return ;;
     esac
-    if [[ ! -f "$so" ]]; then
-        echo "Missing $so" >&2
-        exit 1
-    fi
-    echo "Library: $so (md5 $(md5sum "$so" | cut -d' ' -f1))"
+    for so in "${sos[@]}"; do
+        if [[ ! -f "$so" ]]; then
+            echo "Missing $so" >&2
+            exit 1
+        fi
+        echo "Library: $so (md5 $(md5sum "$so" | cut -d' ' -f1))"
+    done
 }
 
 # Library settings the tasks ran with, compression_lib totals per process,
@@ -152,7 +173,7 @@ print_summary() {
         grep -E '^export (LD_PRELOAD|BUFFER_|COMPRESSION_|ZSTD_)' "$task_run" || echo "  (no library settings)"
     fi
 
-    if [[ "$LIB" == deflate* ]]; then
+    if [[ "$LIB" == deflate* || "$LIB" == zstd-deflate-py ]]; then
         echo "compression_lib per process (files, GB in -> out, seconds):"
         local err name
         for err in $(find "$work_dir" -name .command.err); do
@@ -166,7 +187,7 @@ print_summary() {
             END { for (p in files) printf "  %-38s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
     fi
 
-    if [[ "$LIB" == zstd ]]; then
+    if [[ "$LIB" == zstd* ]]; then
         echo "zstd_lib per process (files, GB in -> out, seconds):"
         local err name
         for err in $(find "$work_dir" -name .command.err); do

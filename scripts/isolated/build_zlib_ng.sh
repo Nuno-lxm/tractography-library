@@ -11,12 +11,16 @@
 
 # Build zlib-ng in zlib-compat mode inside the TractoFlow container, as a
 # drop-in libz.so.1 for LD_PRELOAD (--lib zlib-ng), at bin/zlib-ng/libz.so.1.
+# With a LEVEL argument the default compression level (6) becomes LEVEL, at
+# bin/zlib-ng-lLEVEL/libz.so.1 (--lib zlib-ng --level LEVEL). FSL and MRtrix
+# open gz files without a level, so they get LEVEL; callers that ask for a
+# level (nibabel asks for 1) keep theirs.
 # The source is fetched on the login node, which has network access:
 #   curl -fL https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz |
 #       tar xz -C /projects/I20240002/nunolxm/tractoflow_files
 #
 # Usage:
-#   sbatch build_zlib_ng.sh
+#   sbatch build_zlib_ng.sh [LEVEL]
 
 set -euo pipefail
 
@@ -24,6 +28,13 @@ project_dir="/projects/I20240002/nunolxm"
 lib_dir="$project_dir/tractography-library"
 container="$project_dir/tractoflow_files/scilus_1.6.0.sif"
 src="$project_dir/tractoflow_files/zlib-ng-2.3.3"
+
+export DEFAULT_LEVEL="${1:-}"
+if [[ -n "$DEFAULT_LEVEL" ]] && ! [[ "$DEFAULT_LEVEL" =~ ^[1-9]$ ]]; then
+    echo "Error: LEVEL must be 1-9 (got: $DEFAULT_LEVEL)" >&2
+    exit 1
+fi
+export OUT_DIR="/mnt/bin/zlib-ng${DEFAULT_LEVEL:+-l$DEFAULT_LEVEL}"
 
 if [[ ! -f "$src/configure" ]]; then
     echo "Error: $src missing; see the fetch command in $0" >&2
@@ -40,23 +51,32 @@ echo "gcc: $(gcc --version | head -1)"
 build=$(mktemp -d)
 cp -r /src/. "$build"
 cd "$build"
+if [[ -n "$DEFAULT_LEVEL" ]]; then
+    # deflateInit2 and deflateParams both turn Z_DEFAULT_COMPRESSION into 6
+    [[ $(grep -c '^ *level = 6;$' deflate.c) == 2 ]] || { echo "Error: default level lines not found in deflate.c"; exit 1; }
+    sed -i "s/^\( *level = \)6;$/\1$DEFAULT_LEVEL;/" deflate.c
+    echo "Default level: $DEFAULT_LEVEL"
+fi
 ./configure --zlib-compat
 make -j"${SLURM_CPUS_PER_TASK:-4}" >/dev/null
 
 so=$(ls libz.so.1.* | head -1)
-mkdir -p /mnt/bin/zlib-ng
-cp "$so" /mnt/bin/zlib-ng/libz.so.1
+mkdir -p "$OUT_DIR"
+cp "$so" "$OUT_DIR/libz.so.1"
 rm -rf "$build"
 
-echo "Built /mnt/bin/zlib-ng/libz.so.1 from $so"
-echo "Symbol versions: $(objdump -T /mnt/bin/zlib-ng/libz.so.1 | grep -oE 'ZLIB_[0-9.]+' | sort -uV | tr '\n' ' ')"
+echo "Built $OUT_DIR/libz.so.1 from $so"
+echo "Symbol versions: $(objdump -T "$OUT_DIR/libz.so.1" | grep -oE 'ZLIB_[0-9.]+' | sort -uV | tr '\n' ' ')"
 
 # Python's zlib, gzip round trip and the version it reports under the preload
-LD_PRELOAD=/mnt/bin/zlib-ng/libz.so.1 python3 - <<'PY'
+LD_PRELOAD="$OUT_DIR/libz.so.1" python3 - <<'PY'
 import gzip, os, zlib
 data = os.urandom(1 << 20) + bytes(8 << 20)
 assert gzip.decompress(gzip.compress(data)) == data
 assert zlib.decompress(zlib.compress(data, 1)) == data
 print("python zlib runtime under preload:", zlib.ZLIB_RUNTIME_VERSION)
+level = int(os.environ["DEFAULT_LEVEL"] or 6)
+assert zlib.compress(data) == zlib.compress(data, level)
+print("default level:", level)
 PY
 EOF
