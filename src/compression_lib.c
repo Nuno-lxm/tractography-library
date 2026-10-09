@@ -20,6 +20,7 @@
 
 
 typedef gzFile (*original_gzopen_t)(const char *path, const char *mode);
+typedef gzFile (*original_gzdopen_t)(int fd, const char *mode);
 typedef int (*original_gzclose_t)(gzFile file);
 typedef int (*original_gzwrite_t)(gzFile file, const void *buf, unsigned int len);
 typedef int (*original_deflateInit2__t)(z_streamp strm, int level, int method, int windowBits,
@@ -214,6 +215,38 @@ static int write_all(int fd, const void *buf, size_t len){
     return 0;
 }
 
+// Fallback for when libdeflate can't take the level: write the buffered data
+// with the real zlib through the open fd (zlib's gzclose closes it)
+static int write_with_zlib(deflate_handle_t *h){
+    static original_gzdopen_t original_gzdopen = NULL;
+    static original_gzwrite_t original_gzwrite = NULL;
+    static original_gzclose_t original_gzclose = NULL;
+    if (!original_gzdopen) original_gzdopen = zlib_symbol("gzdopen");
+    if (!original_gzwrite) original_gzwrite = zlib_symbol("gzwrite");
+    if (!original_gzclose) original_gzclose = zlib_symbol("gzclose");
+
+    // zlib levels stop at 9
+    int level = h->level < 0 ? DEFAULT_LEVEL : h->level > 9 ? 9 : h->level;
+    char mode[8];
+    snprintf(mode, sizeof(mode), "wb%d", level);
+
+    gzFile real = original_gzdopen ? original_gzdopen(h->fd, mode) : NULL;
+    if (!real){
+        close(h->fd);
+        return Z_ERRNO;
+    }
+    size_t pos = 0;
+    while (pos < h->size){
+        size_t chunk = h->size - pos < (1u << 30) ? h->size - pos : (1u << 30);
+        if (original_gzwrite(real, h->data + pos, chunk) <= 0){
+            original_gzclose(real);
+            return Z_ERRNO;
+        }
+        pos += chunk;
+    }
+    return original_gzclose(real);
+}
+
 // Reading: open with zlib as usual and remember the handle
 static gzFile open_gz_read(const char *path, const char *mode, original_gzopen_t original_gzopen) {
     gzFile real = original_gzopen(path, mode);
@@ -358,6 +391,15 @@ int gzclose(gzFile file) {
     double start = now();
 
     struct libdeflate_compressor *compressor = libdeflate_alloc_compressor(h->level);
+    if (!compressor){
+        // Not "compression_lib:", which the run summary counts as a file
+        ret = write_with_zlib(h);
+        fprintf(stderr, "compression_lib error: libdeflate can't compress at level %d, wrote %zu bytes with zlib, %.2f s\n",
+            h->level, h->size, now() - start);
+        free(h->data);
+        free(h);
+        return ret;
+    }
     size_t bound = libdeflate_gzip_compress_bound(compressor, h->size);
     void *out = malloc(bound);
     size_t out_size = libdeflate_gzip_compress(compressor, h->data, h->size, out, bound);
@@ -832,6 +874,8 @@ int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
 
     struct libdeflate_compressor *compressor = libdeflate_alloc_compressor(level);
     if (!compressor){
+        // The real stream is already set up, so zlib does this one
+        fprintf(stderr, "compression_lib error: libdeflate can't compress at level %d, stream left to zlib\n", level);
         return ret;
     }
 
