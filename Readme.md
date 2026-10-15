@@ -56,7 +56,7 @@ The run scripts generate a small `run.config` per run for everything else
 
 ## Run Scripts
 
-Slurm batch scripts for Deucalion. All take `--lib none|buffer|prefetch|deflate|deflate-py|logger`
+Slurm batch scripts for Deucalion. All take `--lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|logger`
 (see `scripts/lib/common.sh`, which they share):
 
 | Script | What it runs |
