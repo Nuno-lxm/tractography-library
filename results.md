@@ -29,3 +29,68 @@
 | zlib-ng level 1 | 323 s | 545 s | 30 s | 84 s | 136 s | 342 s | 1460 s |
 
 Pipeline tables: means where runs = 2 (wall spread 6 s for none, 12 s for deflate-py). Ends are seconds after the first task's submit. DWI behind T1 = DTI_Metrics end − Crop_T1 end: Register_T1 waits for both, so this is the most a faster DWI branch can still take off the wall time. Task time = sum of realtime, CPU-h = sum of realtime × %cpu. Final outputs = .nii.gz in the results dir (symlinks followed). Jobs: none 1960388, 1960391; zlib-ng 1961975; deflate-py 1960389, 1960390; deflate-py L1 1961906; deflate-all L1 1961725; zlib-ng L1 1993337. compression_lib md5 e93aa83d (deflate-py), c281c132 (deflate-py L1, deflate-all L1); zlib-ng aea3dd68 (L6), 0e27ccca (L1).
+
+| full pipeline (start date) | job | dataset | subjects | library | partition, node | DWI steps | tasks | wall | task time | CPU-h | max peak_rss | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-02-10 | 953625 | penthera1 | 1 | none | a100 gnx516 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.57 h | 0.8 h | 2.0 | 34.8 GB |  |
+| 2026-02-10 | 953626 | penthera8 | 8 | none | a100 gnx516 (32 cpus) | Denoise+Topup+Local tracking | 193 | 2.17 h | 6.3 h | 15.7 | 41.4 GB |  |
+| 2026-02-10 | 953627 | penthera1 | 1 | none | a100 gnx516 (32 cpus) | Denoise+Topup+PFT tracking | 25 | 4.42 h | 4.6 h | 5.8 | 34.7 GB |  |
+| 2026-02-10 | 953628 | penthera8 | 8 | none | a100 gnx522 (32 cpus) | Denoise+Topup+PFT tracking | 193 | 6.03 h | 35.7 h | 45.1 | 41.2 GB |  |
+| 2026-02-11 | 957729 | mgh1 | 1 | none | a100 gnx510 (32 cpus) | Denoise+Eddy+Local tracking | 24 | 2.14 h | 2.5 h | 12.1 | 155.9 GB |  |
+| 2026-02-12 | 958924 | mgh1 | 1 | none | a100 gnx506 (32 cpus) | Denoise+Eddy+Local tracking | 24 | 2.15 h | 2.5 h | 12.1 | 155.9 GB |  |
+| 2026-04-09 | 1132836 | pent1 | 1 | none | a100 gnx516 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.61 h | 0.8 h | 2.0 | 34.7 GB |  |
+| 2026-04-09 | 1132837 | pent1 | 1 | logger | a100 gnx522 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.61 h | 0.8 h | 2.0 | 34.6 GB |  |
+| 2026-04-09 | 1133187 | pent1 | 1 | logger | a100 gnx516 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.62 h | 0.8 h | 2.0 | 34.8 GB |  |
+| 2026-04-10 | 1133790 | pent1 | 1 | buffer | a100 gnx516 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.60 h | 0.8 h | 2.0 | 34.7 GB |  |
+| 2026-04-13 | 1141434 | mgh4 | 4 | none | a100 gnx503 (32 cpus) | Denoise+Eddy+Local tracking | 93 (+1 failed) | 4.61 h | 11.2 h | 52.8 | 192.3 GB | job OOM-killed |
+| 2026-04-15 | 1151003 | mgh4 | 4 | none | a100 gnx512 (64 cpus) | Denoise+Eddy+Local tracking | 93 (+1 failed) | 3.63 h | 12.1 h | 55.8 | 192.3 GB | 1 retried |
+| 2026-04-24 | 1167478 | mgh8 | 8 | none | a100 gnx502 (32 cpus) | Denoise+Eddy+Local tracking | 95 (+24 failed) | 5.13 h | 30.7 h | 93.1 | 60.2 GB | job OOM-killed |
+| 2026-04-24 | 1167644 | pent8 | 8 | none | a100 gnx504 (32 cpus) | Denoise+Topup+Local tracking | 193 | 1.66 h | 11.2 h | 18.1 | 16.3 GB |  |
+| 2026-04-24 | 1167668 | pent32 | 32 | none | a100 gnx502 (32 cpus) | Denoise+Topup+Local tracking | 378 (+115 failed) | 3.61 h | 21.0 h | 40.9 | 16.5 GB | 23 tasks never completed |
+| 2026-04-24 | 1167986 | pent32 | 32 | none | a100 gnx507 (32 cpus) | Denoise+Topup+Local tracking | 769 (+1 failed) | 5.45 h | 44.3 h | 72.1 | 16.6 GB | 1 retried |
+| 2026-04-24 | 1168155 | pent1 | 1 | buffer | a100 gnx504 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.62 h | 0.8 h | 2.0 | 34.9 GB |  |
+| 2026-04-28 | 1187674 | mgh1 | 1 | none | a100 gnx502 (32 cpus) | Denoise+Eddy+Local tracking | 24 | 2.39 h | 2.8 h | 12.0 | 155.9 GB |  |
+| 2026-05-06 | 1198428 | mgh6 | 6 | none | a100 gnx502 (32 cpus) | Denoise+Eddy+Local tracking | 67 (+19 failed) | 6.50 h | 36.4 h | 107.2 | 64.1 GB | job OOM-killed |
+| 2026-05-20 | 1290972 | pent1 | 1 | none | a100 gnx530 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.68 h | 1.0 h | 1.8 | 13.8 GB |  |
+| 2026-05-20 | 1290795 | pent1 | 1 | buffer | a100 gnx527 (32 cpus) | Denoise+Topup+Local tracking | 25 | 0.69 h | 1.0 h | 1.9 | 14.0 GB |  |
+| 2026-05-27 | 1370534 | pent32 | 32 | none | a100 gnx504 (32 cpus) | Denoise+Topup+Local tracking | 769 | 5.62 h | 47.5 h | 76.6 | 16.7 GB |  |
+| 2026-05-27 | 1370212 | pent32 | 32 | buffer | a100 gnx504 (32 cpus) | Denoise+Topup+Local tracking | 769 | 5.74 h | 48.8 h | 77.1 | 16.6 GB |  |
+| 2026-05-28 | 1373650 | mgh1 | 1 | none | a100 gnx510 (32 cpus) | Denoise+Eddy+Local tracking | 24 | 3.88 h | 4.4 h | 11.5 | 51.9 GB |  |
+| 2026-05-28 | 1373649 | mgh1 | 1 | buffer | a100 gnx510 (32 cpus) | Denoise+Eddy+Local tracking | 24 | 3.88 h | 4.4 h | 11.6 | 51.9 GB |  |
+| 2026-05-29 | 1376351 | mgh4 | 4 | buffer | a100 gnx506 (32 cpus) | Denoise+Eddy+Local tracking | 57 (+14 failed) | 5.25 h | 23.7 h | 61.2 | 64.1 GB | job OOM-killed |
+| 2026-06-11 | 1436676 | mgh2 | 2 | buffer | a100 gnx513 (32 cpus) | Denoise+Eddy+Local tracking | 47 | 3.96 h | 8.9 h | 23.6 | 54.6 GB |  |
+| 2026-06-26 | 1706332 | Penthera_3T | 74 | none | x86 cnx027 (128 cpus) | Denoise | 1333 | 1.44 h | 52.1 h | 122.3 | 16.8 GB |  |
+| 2026-06-26 | 1706366 | Penthera_3T | 74 | buffer | x86 cnx201 (128 cpus) | Denoise | 1333 | 1.46 h | 52.8 h | 124.3 | 16.8 GB |  |
+| 2026-06-29 | 1711577 | mgh8 | 8 | none | x86 cnx031 (128 cpus) | Denoise | 145 (+2 failed) | 3.08 h | 27.7 h | 86.0 | 68.6 GB | 2 retried |
+| 2026-06-29 | 1711578 | mgh8 | 8 | buffer | x86 cnx257 (128 cpus) | Denoise | 145 | 3.08 h | 27.7 h | 86.0 | 68.6 GB |  |
+
+| full pipeline, per-subject mean realtime (min) | Denoise_DWI | Topup | Eddy | N4_DWI | Resample_DWI | FODF_Metrics | Register_T1 | Local_Tracking | PFT_Tracking |
+|---|---|---|---|---|---|---|---|---|---|
+| 953625 penthera1 none a100 | 0.9 | 5.8 | – | 1.3 | 2.3 | 5.2 | 2.0 | 8.7 | – |
+| 953626 penthera8 none a100 | 0.9 | 5.8 | – | 1.3 | 2.4 | 5.1 | 2.0 | 10.2 | – |
+| 953627 penthera1 none a100 | 0.9 | 5.8 | – | 1.3 | 2.3 | 5.3 | 2.0 | – | 240.2 |
+| 953628 penthera8 none a100 | 0.8 | 5.8 | – | 1.3 | 2.4 | 5.2 | 2.1 | – | 230.9 |
+| 957729 mgh1 none a100 | 40.0 | – | 47.9 | 10.4 | 10.8 | 4.7 | 1.9 | 5.0 | – |
+| 958924 mgh1 none a100 | 40.0 | – | 47.9 | 10.4 | 10.8 | 4.7 | 1.9 | 5.0 | – |
+| 1132836 pent1 none a100 | 0.8 | 5.8 | – | 1.3 | 2.3 | 5.2 | 1.9 | 10.4 | – |
+| 1132837 pent1 logger a100 | 0.9 | 5.7 | – | 1.2 | 2.3 | 5.2 | 1.9 | 10.6 | – |
+| 1133187 pent1 logger a100 | 0.9 | 5.8 | – | 1.3 | 2.4 | 5.2 | 1.9 | 10.7 | – |
+| 1133790 pent1 buffer a100 | 0.9 | 5.7 | – | 1.2 | 2.3 | 5.1 | 1.9 | 10.4 | – |
+| 1151003 mgh4 none a100 | 45.1 | – | 67.3 | 11.5 | 12.0 | 5.3 | 2.1 | 8.0 | – |
+| 1167644 pent8 none a100 | 2.6 | 5.9 | – | 1.3 | 2.4 | 6.6 | 6.8 | 13.7 | – |
+| 1167986 pent32 none a100 | 2.5 | 5.9 | – | 1.3 | 2.5 | 6.7 | 6.8 | 18.1 | – |
+| 1168155 pent1 buffer a100 | 0.9 | 5.8 | – | 1.3 | 2.3 | 5.4 | 1.9 | 11.0 | – |
+| 1187674 mgh1 none a100 | 42.3 | – | 55.1 | 11.0 | 12.7 | 5.2 | 2.0 | 6.3 | – |
+| 1290972 pent1 none a100 | 2.4 | 5.8 | – | 1.3 | 2.3 | 6.5 | 6.2 | 10.4 | – |
+| 1290795 pent1 buffer a100 | 2.5 | 5.8 | – | 1.3 | 2.3 | 6.5 | 6.3 | 11.0 | – |
+| 1370534 pent32 none a100 | 2.8 | 6.1 | – | 1.4 | 2.5 | 7.0 | 7.1 | 18.5 | – |
+| 1370212 pent32 buffer a100 | 2.6 | 6.0 | – | 1.3 | 2.5 | 6.8 | 7.0 | 21.1 | – |
+| 1373650 mgh1 none a100 | 133.3 | – | 54.8 | 10.3 | 10.8 | 6.0 | 6.0 | 6.6 | – |
+| 1373649 mgh1 buffer a100 | 133.4 | – | 54.1 | 10.3 | 10.7 | 6.0 | 7.5 | 6.2 | – |
+| 1436676 mgh2 buffer a100 | 136.0 | – | 52.6 | 10.7 | 11.0 | 6.8 | 6.3 | 6.4 | – |
+| 1706332 Penthera_3T none x86 | 3.0 | – | – | 1.5 | 2.6 | 6.9 | 7.6 | – | – |
+| 1706366 Penthera_3T buffer x86 | 3.0 | – | – | 1.5 | 2.6 | 7.0 | 7.7 | – | – |
+| 1711577 mgh8 none x86 | 133.9 | – | – | 11.9 | 12.9 | 7.7 | 7.2 | – | – |
+| 1711578 mgh8 buffer x86 | 134.0 | – | – | 11.9 | 12.9 | 7.6 | 7.2 | – | – |
+
+Full pipeline tables: from the traces in output/ (baseline/, buffer/, logger/, tests/baseline/, tests/buffer/). The output images of these runs are gone: they were only in the work dirs, deleted in the Oct 2026 cleanup. Wall = Slurm elapsed (sacct). Task time and CPU-h count completed tasks only; max peak_rss is the largest single task. a100 = normal-a100 partition (A100 40 GB, Eddy and tracking on GPU); x86 = normal-x86 exclusive node, pipeline without Eddy, Topup and tracking. The per-subject table only lists runs where every task completed, as minutes per subject averaged over subjects. The multi-threaded steps (Denoise_DWI, Register_T1) did not get the same cores in every run: about 12 (1090–1370 %cpu) in every run up to Apr 15 and in 1168155 and 1187674, but about 4 (355–385 %cpu) in 1167644 and 1167986 (Apr 24) and in every run from May 20 on. That is why Denoise_DWI on mgh1 goes from 40–42 to 133 min and the mgh1 wall from 2.1–2.4 to 3.9 h; only compare runs from the same group. Left out: 1115208, 1174146, 1174273, 1174829 (short or aborted test runs, traces with unstarted tasks).
