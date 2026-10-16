@@ -140,6 +140,31 @@ static int copy_bytes(const char *from, const char *to, long long skip_tail, con
     return ok ? 0 : -1;
 }
 
+// Flips the lowest bit of the byte at offset (from the end when negative)
+static int flip_byte(const char *file, long long offset){
+    unsigned char c;
+    int fd = open(file, O_RDWR);
+    if (offset < 0) offset += file_size(file);
+    int ok = fd >= 0 && pread(fd, &c, 1, offset) == 1;
+    c ^= 1;
+    ok = ok && pwrite(fd, &c, 1, offset) == 1;
+    if (fd >= 0) close(fd);
+    return ok ? 0 : -1;
+}
+
+// Reads the whole file in 64 KB calls; returns the last gzread result (0 at
+// the end, -1 on an error), with gzerror's code in *err and message in msg
+static int read_to_end(const char *file, unsigned char *buf, int *err, char msg[128]){
+    gzFile r = gzopen(file, "rb");
+    int got = -2;
+    if (r){
+        while ((got = gzread(r, buf, 65536)) > 0);
+        snprintf(msg, 128, "%s", gzerror(r, err));
+        gzclose(r);
+    }
+    return got;
+}
+
 // The zstd tool decodes file to exactly data (always true without the tool)
 static int cli_matches(const char *file, const unsigned char *data, size_t n){
     if (!cli) return 1;
@@ -483,8 +508,23 @@ static void test_truncated(void){
     CHECK(gzread(r, back, 1) == -1);
     CHECK(gzclose(r) == Z_DATA_ERROR);
 
+    // Every frame has a checksum (bit 2 of the frame header descriptor): a
+    // damaged checksum, or a damaged byte in the data, fails the read
+    unsigned char hdr[5] = {0};
+    int fd = open(f, O_RDONLY);
+    CHECK(fd >= 0 && read(fd, hdr, 5) == 5 && (hdr[4] & 4));
+    close(fd);
+    const char *bad = path("z_bad.gz");
+    CHECK(copy_bytes(f, bad, 0, NULL) == 0 && flip_byte(bad, -1) == 0);
+    char msg[128] = "";
+    CHECK(read_to_end(bad, back, &err, msg) == -1 && err == Z_DATA_ERROR);
+    CHECK(strstr(msg, "checksum") != NULL);
+    CHECK(copy_bytes(f, bad, 0, NULL) == 0 && flip_byte(bad, file_size(f) / 2) == 0);
+    CHECK(read_to_end(bad, back, &err, msg) == -1 && err == Z_DATA_ERROR);
+    printf("    damaged data: %s\n", strchr(msg, ':') ? strchr(msg, ':') + 2 : msg);
+
     // Only the magic number left: still opened as zstd, fails on the read
-    int fd = open(cut, O_WRONLY | O_TRUNC);
+    fd = open(cut, O_WRONLY | O_TRUNC);
     CHECK(fd >= 0 && write(fd, "\x28\xb5\x2f\xfd", 4) == 4);
     close(fd);
     r = gzopen(cut, "rb");
@@ -765,7 +805,7 @@ int main(void){
     run("gzgets, gzgetc, gzungetc", test_gets_getc_ungetc);
     run("seeks, gztell, header cache", test_seeks);
     run("concatenated frames", test_concatenated);
-    run("truncated file", test_truncated);
+    run("truncated and damaged files", test_truncated);
     run("empty file", test_empty);
     run("file over 4 GB", test_over_4gb);
     run("gzip, plain and gzdopen files", test_gzip_and_raw);

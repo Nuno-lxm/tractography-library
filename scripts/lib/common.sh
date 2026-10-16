@@ -18,8 +18,8 @@
 #                   other gz write and Python's streams
 #       logger      logger.so, logs every IO call to /mnt/logger.log
 #   --level N   deflate*, zstd-deflate-py: compress every image at libdeflate
-#               level N (0-12); the zstd targets stay at zstd's default
-#               zstd: zstd level N (1-19, default 3)
+#               level N (0-12); the zstd targets stay at zstd_lib's default
+#               zstd: zstd level N (1-19, default 1)
 #               zlib-ng: default level N (1-9), from the build at
 #               bin/zlib-ng-lN (scripts/isolated/build_zlib_ng.sh N)
 #   --debug     deflate*, zstd*: log every wrapped call

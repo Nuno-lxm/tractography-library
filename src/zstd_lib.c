@@ -362,10 +362,13 @@ static gzFile open_write(const char *path, const char *mode, original_gzopen_t o
     h->level = zstd_level();
 
     // No workers: the frame is compressed on the caller's thread, like zlib.
-    // ZSTD_WINDOW_LOG caps the window, which bounds the writer's and every
-    // reader's memory (0: the level's default)
+    // The checksum (XXH64 of the content, checked by every decoder) catches
+    // damaged data, as gzip's CRC-32 does. ZSTD_WINDOW_LOG caps the window,
+    // which bounds the writer's and every reader's memory (0: the level's
+    // default)
     ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, h->level);
     ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, 0);
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
     long long window_log = env_number("ZSTD_WINDOW_LOG", 0);
     if (window_log){
         size_t ret = ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int)window_log);
