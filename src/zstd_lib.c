@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,38 +20,99 @@
 #undef gzgetc
 
 #define MAX_HANDLES 64
+#define DEFAULT_LEVEL 1
+// Size of each handle's buffers, so also of its write() and read() calls
+#define DEFAULT_BUFFER_SIZE (128 * 1024)
+// Decompressed bytes kept from the start of each file read (compression_lib's
+// READ_LAZY_LIMIT), so a rewind to read the header again is free
+#define DEFAULT_HEADER_CACHE (1024 * 1024)
+// Contexts kept after gzclose for the next file
+#define POOL_SIZE 4
+// Characters gzungetc can push back (zlib guarantees one)
+#define UNGET_SIZE 64
+// ZSTD_WINDOWLOG_LIMIT_DEFAULT, which 1.4.8 only declares for static linking:
+// the largest window a decoder accepts unless told otherwise
+#define WINDOW_LOG_LIMIT_DEFAULT 27
 
 
 typedef gzFile (*original_gzopen_t)(const char *path, const char *mode);
+typedef gzFile (*original_gzdopen_t)(int fd, const char *mode);
+typedef int (*original_gzbuffer_t)(gzFile file, unsigned size);
+typedef int (*original_gzsetparams_t)(gzFile file, int level, int strategy);
 typedef int (*original_gzwrite_t)(gzFile file, const void *buf, unsigned int len);
+typedef z_size_t (*original_gzfwrite_t)(voidpc buf, z_size_t size, z_size_t nitems, gzFile file);
+typedef int (*original_gzvprintf_t)(gzFile file, const char *format, va_list va);
+typedef int (*original_gzputs_t)(gzFile file, const char *s);
+typedef int (*original_gzputc_t)(gzFile file, int c);
+typedef int (*original_gzflush_t)(gzFile file, int flush);
 typedef int (*original_gzread_t)(gzFile file, voidp buf, unsigned len);
-typedef int (*original_gzclose_t)(gzFile file);
+typedef z_size_t (*original_gzfread_t)(voidp buf, z_size_t size, z_size_t nitems, gzFile file);
+typedef int (*original_gzgetc_t)(gzFile file);
+typedef int (*original_gzungetc_t)(int c, gzFile file);
+typedef char *(*original_gzgets_t)(gzFile file, char *buf, int len);
 typedef z_off_t (*original_gzseek_t)(gzFile file, z_off_t offset, int whence);
 typedef z_off64_t (*original_gzseek64_t)(gzFile file, z_off64_t offset, int whence);
+typedef int (*original_gzrewind_t)(gzFile file);
 typedef z_off_t (*original_gztell_t)(gzFile file);
 typedef z_off64_t (*original_gztell64_t)(gzFile file);
 typedef int (*original_gzeof_t)(gzFile file);
+typedef int (*original_gzdirect_t)(gzFile file);
 typedef const char *(*original_gzerror_t)(gzFile file, int *errnum);
-typedef int (*original_gzgetc_t)(gzFile file);
+typedef void (*original_gzclearerr_t)(gzFile file);
+typedef int (*original_gzclose_t)(gzFile file);
 
 
-// A gz file taken over from zlib. Writing: everything is buffered in data and
-// compressed with zstd in one go at gzclose. Reading (only files that are
-// already zstd): the whole file is decompressed into data at gzopen.
-// writing comes first: zlib's gzgetc macro reads the first field as its count
-// of buffered bytes, and 0 sends a read handle to the gzgetc function
+enum { WRITE_STREAM = 1, READ_STREAM };
+
+// A gz file taken over from zlib and streamed through zstd: writes to target
+// files, and reads of any file that starts with the zstd magic number.
+// x comes first and stays zero: zlib's gzgetc macro reads it as its count of
+// buffered bytes, and 0 sends every call to the gzgetc function
 typedef struct{
-    int writing;
-    int eof;
+    struct gzFile_s x;
+    int mode;
     int fd;
+    char *path;             // for messages; "<fd:N>" after gzdopen
+    int err;                // Z_OK, or the error gzerror reports
+    char *msg;
+    z_off64_t upos;         // uncompressed position, what gztell returns
+    unsigned buf_size;      // size of in and out, set by gzbuffer before the first I/O
+    unsigned char *in;      // read: compressed input
+    unsigned char *out;     // write: compressed output; read: decompressed output
+
+    // Write
+    ZSTD_CCtx *cctx;
     int level;
-    unsigned char *data;
-    size_t size;
-    size_t capacity;
-    size_t pos;
+    size_t out_pos;         // compressed bytes waiting in out
+
+    // Read
+    ZSTD_DCtx *dctx;
+    off_t start;            // file offset of the first frame (not 0 after gzdopen)
+    size_t in_pos, in_end;  // unread part of in
+    int raw_eof;            // read() returned 0
+    int frame_open;         // the decoder is inside a frame
+    int end;                // every frame is decoded
+    int past;               // a read asked for more than was left (gzeof)
+    z_off64_t dpos;         // uncompressed position the decoder has reached
+    size_t out_len;         // bytes decoded into out, ending at dpos
+    unsigned char *cache;   // the first cache_limit bytes of the file
+    size_t cache_len, cache_limit;
+    unsigned char back[UNGET_SIZE]; // gzungetc's characters, read before upos
+    int nback;
+    int rewinds;            // times the decoder went back to the first frame
+
+    // For the line printed at gzclose
+    long long raw_bytes;    // compressed bytes written or read
+    long long data_bytes;   // uncompressed bytes compressed or decoded
+    double secs;            // time spent compressing or decoding, syscalls included
 } zstd_handle_t;
 
 static zstd_handle_t *handles[MAX_HANDLES];
+static int handle_count;
+
+static ZSTD_CCtx *cctx_pool[POOL_SIZE];
+static ZSTD_DCtx *dctx_pool[POOL_SIZE];
+static int cctx_pooled, dctx_pooled;
 
 
 /* Helpers */
@@ -70,7 +132,18 @@ static int zstd_level(void){
     if (env && *env){
         return atoi(env);
     }
-    return ZSTD_CLEVEL_DEFAULT;
+    return DEFAULT_LEVEL;
+}
+
+// A non-negative number from the environment, or def when unset or invalid
+static long long env_number(const char *name, long long def){
+    const char *env = getenv(name);
+    if (!env || !*env){
+        return def;
+    }
+    char *end;
+    long long value = strtoll(env, &end, 10);
+    return *end || value < 0 ? def : value;
 }
 
 // Only gz writes to files matching a ZSTD_FILE_TARGETS glob become zstd (unset:
@@ -99,45 +172,39 @@ static int is_target(const char *path){
     return match;
 }
 
+// gzopen's mode as zlib reads it: the last of r, w and a wins. 0 for what
+// only zlib handles: "+", no r/w/a, or a transparent ("T") write
+static int open_mode(const char *mode){
+    int m = 0;
+    int transparent = 0;
+    for (const char *p = mode; *p; p++){
+        if (*p == 'r' || *p == 'w' || *p == 'a'){
+            m = *p;
+        } else if (*p == '+'){
+            return 0;
+        } else if (*p == 'T'){
+            transparent = 1;
+        }
+    }
+    return m == 'w' && transparent ? 0 : m;
+}
+
 static double now(void){
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-static int find_handle(gzFile file){
+// The library's handle behind file, or NULL for one of zlib's
+static zstd_handle_t *get_handle(gzFile file){
+    if (handle_count == 0 || !file){
+        return NULL;
+    }
     for (int i = 0; i < MAX_HANDLES; i++){
         if (handles[i] && (gzFile)handles[i] == file)
-            return i;
+            return handles[i];
     }
-    return -1;
-}
-
-static int free_slot(void){
-    for (int i = 0; i < MAX_HANDLES; i++){
-        if (!handles[i])
-            return i;
-    }
-    return -1;
-}
-
-// Makes room for len more bytes in a write handle's buffer
-static int grow(zstd_handle_t *h, size_t len){
-    if (h->size + len <= h->capacity){
-        return 0;
-    }
-    size_t new_capacity = h->capacity ? h->capacity : 65536;
-    while (new_capacity < h->size + len){
-        new_capacity *= 2;
-    }
-    unsigned char *new_data = realloc(h->data, new_capacity);
-    if (!new_data){
-        perror("realloc");
-        return -1;
-    }
-    h->data = new_data;
-    h->capacity = new_capacity;
-    return 0;
+    return NULL;
 }
 
 static int write_all(int fd, const void *buf, size_t len){
@@ -145,6 +212,8 @@ static int write_all(int fd, const void *buf, size_t len){
     while (len > 0){
         ssize_t written = write(fd, ptr, len);
         if (written < 0){
+            if (errno == EINTR)
+                continue;
             return -1;
         }
         ptr += written;
@@ -153,172 +222,221 @@ static int write_all(int fd, const void *buf, size_t len){
     return 0;
 }
 
-static int read_all(int fd, void *buf, size_t len){
-    unsigned char *ptr = buf;
-    while (len > 0){
-        ssize_t got = read(fd, ptr, len);
-        if (got <= 0){
-            return -1;
-        }
-        ptr += got;
-        len -= got;
+// 1 if the 4 bytes at offset are the zstd magic number, 0 otherwise (gzip,
+// plain, too short)
+static int is_zstd_at(int fd, off_t offset){
+    unsigned char magic[4];
+    if (pread(fd, magic, 4, offset) != 4){
+        return 0;
+    }
+    // ZSTD_MAGICNUMBER is stored little-endian at the start of every frame
+    return (magic[0] | magic[1] << 8 | magic[2] << 16 | (unsigned)magic[3] << 24) == ZSTD_MAGICNUMBER;
+}
+
+// Records the error gzerror reports, printing it the first time
+static void set_error(zstd_handle_t *h, int err, const char *why){
+    if (h->err == Z_OK){
+        fprintf(stderr, "zstd_lib: can't %s %s: %s\n", h->mode == WRITE_STREAM ? "write" : "read", h->path, why);
+    }
+    h->err = err;
+    free(h->msg);
+    h->msg = NULL;
+    if (err != Z_MEM_ERROR && asprintf(&h->msg, "%s: %s", h->path, why) < 0){
+        h->msg = NULL;
+    }
+}
+
+// in and out are allocated at the first I/O, so gzbuffer can still size them
+static int alloc_buffers(zstd_handle_t *h){
+    if (h->out){
+        return 0;
+    }
+    h->out = malloc(h->buf_size);
+    h->in = h->mode == READ_STREAM ? malloc(h->buf_size) : NULL;
+    if (!h->out || (h->mode == READ_STREAM && !h->in)){
+        free(h->out);
+        free(h->in);
+        h->out = h->in = NULL;
+        set_error(h, Z_MEM_ERROR, "out of memory");
+        return -1;
     }
     return 0;
 }
 
-// 1 if path starts with the zstd magic number, 0 otherwise (gzip, plain,
-// too short, missing)
-static int is_zstd(const char *path){
-    int fd = open(path, O_RDONLY);
-    if (fd < 0){
-        return 0;
-    }
-    unsigned char magic[4];
-    int ok = read_all(fd, magic, 4) == 0;
-    close(fd);
 
-    // ZSTD_MAGICNUMBER is stored little-endian at the start of every frame
-    return ok && (magic[0] | magic[1] << 8 | magic[2] << 16 | (unsigned)magic[3] << 24) == ZSTD_MAGICNUMBER;
+/* Contexts */
+
+// Contexts are reset and reused across files instead of recreated, which
+// keeps their allocated tables
+static ZSTD_CCtx *take_cctx(void){
+    return cctx_pooled > 0 ? cctx_pool[--cctx_pooled] : ZSTD_createCCtx();
 }
 
-// Decompresses a zstd file written by gzclose (one frame with its size
-// stored). Returns NULL with errno set on any failure
-static unsigned char *load_zstd(const char *path, size_t *out_size){
-    int fd = open(path, O_RDONLY);
-    if (fd < 0){
+static void put_cctx(ZSTD_CCtx *cctx){
+    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
+    if (cctx_pooled < POOL_SIZE){
+        cctx_pool[cctx_pooled++] = cctx;
+    } else{
+        ZSTD_freeCCtx(cctx);
+    }
+}
+
+static ZSTD_DCtx *take_dctx(void){
+    return dctx_pooled > 0 ? dctx_pool[--dctx_pooled] : ZSTD_createDCtx();
+}
+
+static void put_dctx(ZSTD_DCtx *dctx){
+    ZSTD_DCtx_reset(dctx, ZSTD_reset_session_and_parameters);
+    if (dctx_pooled < POOL_SIZE){
+        dctx_pool[dctx_pooled++] = dctx;
+    } else{
+        ZSTD_freeDCtx(dctx);
+    }
+}
+
+
+/* Handles */
+
+static zstd_handle_t *add_handle(int mode, int fd, const char *path){
+    int slot = 0;
+    while (slot < MAX_HANDLES && handles[slot]){
+        slot++;
+    }
+    if (slot == MAX_HANDLES){
         return NULL;
     }
 
-    unsigned char *in = NULL;
-    unsigned char *out = NULL;
-    const char *why = NULL;
-    struct stat st;
-    double start = now();
-
-    if (fstat(fd, &st) < 0){
-        why = strerror(errno);
-        goto fail;
+    zstd_handle_t *h = calloc(1, sizeof(zstd_handle_t));
+    if (!h || !(h->path = strdup(path))){
+        free(h);
+        return NULL;
     }
-    in = malloc(st.st_size);
-    if (!in){
-        why = "out of memory";
-        goto fail;
-    }
-    if (read_all(fd, in, st.st_size) < 0){
-        why = "read failed";
-        goto fail;
-    }
+    h->mode = mode;
+    h->fd = fd;
+    h->err = Z_OK;
+    h->buf_size = DEFAULT_BUFFER_SIZE;
+    handles[slot] = h;
+    handle_count++;
+    return h;
+}
 
-    unsigned long long size = ZSTD_getFrameContentSize(in, st.st_size);
-    if (size == ZSTD_CONTENTSIZE_UNKNOWN || size == ZSTD_CONTENTSIZE_ERROR){
-        why = "no content size in the frame header";
-        goto fail;
+static void free_handle(zstd_handle_t *h){
+    for (int i = 0; i < MAX_HANDLES; i++){
+        if (handles[i] == h){
+            handles[i] = NULL;
+            handle_count--;
+        }
     }
-
-    // malloc(0) may return NULL, so always ask for at least one byte
-    out = malloc(size ? size : 1);
-    if (!out){
-        why = "out of memory";
-        goto fail;
-    }
-    // Extra frames after the first don't fit in size and fail here
-    size_t got = ZSTD_decompress(out, size, in, st.st_size);
-    if (ZSTD_isError(got) || got != size){
-        why = ZSTD_isError(got) ? ZSTD_getErrorName(got) : "short frame";
-        goto fail;
-    }
-
-    // One summary line per file read, always printed
-    fprintf(stderr, "zstd_lib: read, %lld -> %llu bytes, %.2f s\n", (long long)st.st_size, size, now() - start);
-
-    free(in);
-    close(fd);
-    *out_size = size;
-    return out;
-
-fail:
-    fprintf(stderr, "zstd_lib: can't read %s: %s\n", path, why);
-    free(in);
-    free(out);
-    close(fd);
-    errno = EIO;
-    return NULL;
+    free(h->in);
+    free(h->out);
+    free(h->cache);
+    free(h->path);
+    free(h->msg);
+    free(h);
 }
 
 
 /* Open */
 
 static gzFile open_write(const char *path, const char *mode, original_gzopen_t original_gzopen){
-    int slot = free_slot();
-    if (slot < 0){
+    if (handle_count == MAX_HANDLES){
+        fprintf(stderr, "zstd_lib: all %d handles in use, %s stays gzip\n", MAX_HANDLES, path);
         return original_gzopen(path, mode);
     }
 
-    zstd_handle_t *h = calloc(1, sizeof(zstd_handle_t));
+    // Same flags as zlib: "x" for O_EXCL, "e" for O_CLOEXEC
+    int flags = O_WRONLY | O_CREAT | O_TRUNC | (strchr(mode, 'x') ? O_EXCL : 0) | (strchr(mode, 'e') ? O_CLOEXEC : 0);
+    int fd = open(path, flags, 0666);
+    if (fd < 0){
+        return NULL;
+    }
+    ZSTD_CCtx *cctx = take_cctx();
+    zstd_handle_t *h = cctx ? add_handle(WRITE_STREAM, fd, path) : NULL;
     if (!h){
-        return original_gzopen(path, mode);
-    }
-
-    h->fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (h->fd < 0){
-        free(h);
-        return NULL;
-    }
-    h->writing = 1;
-    h->level = zstd_level();
-    handles[slot] = h;
-    return (gzFile)h;
-}
-
-// zlib would read a zstd file as uncompressed data without any error, so a
-// zstd file this library can't serve fails the open instead
-static gzFile open_read(const char *path, const char *mode, original_gzopen_t original_gzopen){
-    if (!is_zstd(path)){
-        return original_gzopen(path, mode);
-    }
-
-    int slot = free_slot();
-    if (slot < 0){
-        fprintf(stderr, "zstd_lib: can't read %s: all %d handles in use\n", path, MAX_HANDLES);
-        errno = EMFILE;
-        return NULL;
-    }
-
-    size_t size;
-    unsigned char *data = load_zstd(path, &size);
-    if (!data){
-        return NULL;
-    }
-
-    zstd_handle_t *h = calloc(1, sizeof(zstd_handle_t));
-    if (!h){
-        fprintf(stderr, "zstd_lib: can't read %s: out of memory\n", path);
-        free(data);
+        if (cctx) put_cctx(cctx);
+        close(fd);
         errno = ENOMEM;
         return NULL;
     }
-    h->fd = -1;
-    h->data = data;
-    h->size = size;
-    handles[slot] = h;
+    h->cctx = cctx;
+    h->level = zstd_level();
+
+    // No workers: the frame is compressed on the caller's thread, like zlib.
+    // ZSTD_WINDOW_LOG caps the window, which bounds the writer's and every
+    // reader's memory (0: the level's default)
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, h->level);
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, 0);
+    long long window_log = env_number("ZSTD_WINDOW_LOG", 0);
+    if (window_log){
+        size_t ret = ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int)window_log);
+        if (ZSTD_isError(ret)){
+            fprintf(stderr, "zstd_lib: ZSTD_WINDOW_LOG=%lld ignored: %s\n", window_log, ZSTD_getErrorName(ret));
+        }
+    }
     return (gzFile)h;
 }
 
-// Shared by gzopen and gzopen64; appends and non-target writes stay with zlib.
-// Reads of any file that is zstd are always taken over
+// Takes over fd, whose first frame starts at start. On failure the caller
+// still owns fd
+static gzFile open_read(int fd, off_t start, const char *label){
+    if (handle_count == MAX_HANDLES){
+        fprintf(stderr, "zstd_lib: can't read %s: all %d handles in use\n", label, MAX_HANDLES);
+        errno = EMFILE;
+        return NULL;
+    }
+    ZSTD_DCtx *dctx = take_dctx();
+    zstd_handle_t *h = dctx ? add_handle(READ_STREAM, fd, label) : NULL;
+    if (!h){
+        fprintf(stderr, "zstd_lib: can't read %s: out of memory\n", label);
+        if (dctx) put_dctx(dctx);
+        errno = ENOMEM;
+        return NULL;
+    }
+    h->dctx = dctx;
+    h->start = start;
+    h->cache_limit = env_number("ZSTD_HEADER_CACHE", DEFAULT_HEADER_CACHE);
+
+    // Frames written with a ZSTD_WINDOW_LOG above the decoder's default limit
+    // can only be read with the same setting
+    long long window_log = env_number("ZSTD_WINDOW_LOG", 0);
+    if (window_log > WINDOW_LOG_LIMIT_DEFAULT){
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, (int)window_log);
+    }
+    return (gzFile)h;
+}
+
+// Any regular file that starts with the zstd magic number is read here,
+// whatever the targets, so a zstd file is always read correctly. gzip and
+// plain files go on to the next zlib
+static gzFile open_read_path(const char *path, const char *mode, original_gzopen_t original_gzopen){
+    int fd = open(path, O_RDONLY | (strchr(mode, 'e') ? O_CLOEXEC : 0));
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || !is_zstd_at(fd, 0)){
+        if (fd >= 0) close(fd);
+        return original_gzopen(path, mode);
+    }
+    gzFile file = open_read(fd, 0, path);
+    if (!file){
+        close(fd);
+    }
+    return file;
+}
+
+// Shared by gzopen and gzopen64; appends and non-target writes stay with zlib
 static gzFile open_gz(const char *name, const char *path, const char *mode, original_gzopen_t original_gzopen){
     gzFile file;
-    if (strchr(mode, 'a') || (strchr(mode, 'w') && !is_target(path))){
-        file = original_gzopen(path, mode);
-    } else if (strchr(mode, 'w')){
+    int m = open_mode(mode);
+    if (m == 'w' && is_target(path)){
         file = open_write(path, mode, original_gzopen);
+    } else if (m == 'r'){
+        file = open_read_path(path, mode, original_gzopen);
     } else{
-        file = open_read(path, mode, original_gzopen);
+        file = original_gzopen(path, mode);
     }
 
     if (debug_enabled()){
         fprintf(stderr, "%s: %s, mode %s -> %p%s\n", name, path, mode, (void*)file,
-            find_handle(file) >= 0 ? " (zstd)" : "");
+            get_handle(file) ? " (zstd)" : "");
     }
     return file;
 }
@@ -337,8 +455,105 @@ gzFile gzopen64(const char *path, const char *mode) {
     return open_gz("gzopen64", path, mode, original_gzopen64);
 }
 
+// Writes stay with zlib: there's no path to match against the targets. A
+// regular file open for reading is checked for zstd from its current offset
+gzFile gzdopen(int fd, const char *mode) {
+    static original_gzdopen_t original_gzdopen = NULL;
+    if (!original_gzdopen) original_gzdopen = dlsym(RTLD_NEXT, "gzdopen");
+
+    gzFile file;
+    struct stat st;
+    off_t start = -1;
+    if (open_mode(mode) == 'r' && fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+            (start = lseek(fd, 0, SEEK_CUR)) >= 0 && is_zstd_at(fd, start)){
+        char label[32];
+        snprintf(label, sizeof(label), "<fd:%d>", fd);
+        file = open_read(fd, start, label);
+    } else{
+        file = original_gzdopen(fd, mode);
+    }
+
+    if (debug_enabled()){
+        fprintf(stderr, "gzdopen: fd %d, mode %s -> %p%s\n", fd, mode, (void*)file,
+            get_handle(file) ? " (zstd)" : "");
+    }
+    return file;
+}
+
+// Like zlib: only before the first I/O. Sets both buffers, so the size of
+// every write() or read()
+int gzbuffer(gzFile file, unsigned size) {
+    static original_gzbuffer_t original_gzbuffer = NULL;
+    if (!original_gzbuffer) original_gzbuffer = dlsym(RTLD_NEXT, "gzbuffer");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzbuffer(file, size);
+    }
+    if (h->out){
+        return -1;
+    }
+    h->buf_size = size < 8 ? 8 : size;
+    return 0;
+}
+
+// The level comes from ZSTD_LEVEL, as for gzopen's mode string
+int gzsetparams(gzFile file, int level, int strategy) {
+    static original_gzsetparams_t original_gzsetparams = NULL;
+    if (!original_gzsetparams) original_gzsetparams = dlsym(RTLD_NEXT, "gzsetparams");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzsetparams(file, level, strategy);
+    }
+    return h->mode == WRITE_STREAM && h->err == Z_OK ? Z_OK : Z_STREAM_ERROR;
+}
+
 
 /* Write */
+
+static int write_out(zstd_handle_t *h){
+    if (write_all(h->fd, h->out, h->out_pos) < 0){
+        set_error(h, Z_ERRNO, strerror(errno));
+        return -1;
+    }
+    h->raw_bytes += h->out_pos;
+    h->out_pos = 0;
+    return 0;
+}
+
+// Compresses len bytes straight from buf. out goes to the file each time it
+// fills, so every write() is buf_size bytes; ZSTD_e_flush and ZSTD_e_end
+// also write out whatever is left. Returns 0 or -1
+static int compress_data(zstd_handle_t *h, const void *buf, size_t len, ZSTD_EndDirective op){
+    if (h->err != Z_OK || alloc_buffers(h) < 0){
+        return -1;
+    }
+
+    double start = now();
+    ZSTD_inBuffer in = {buf, len, 0};
+    for (;;){
+        ZSTD_outBuffer out = {h->out, h->buf_size, h->out_pos};
+        size_t left = ZSTD_compressStream2(h->cctx, &out, &in, op);
+        h->out_pos = out.pos;
+        if (ZSTD_isError(left)){
+            set_error(h, Z_STREAM_ERROR, ZSTD_getErrorName(left));
+            return -1;
+        }
+        // A flush or end is done once zstd holds nothing back (left is 0)
+        int done = op == ZSTD_e_continue ? in.pos == in.size : left == 0;
+        if (h->out_pos == h->buf_size || (done && op != ZSTD_e_continue && h->out_pos > 0)){
+            if (write_out(h) < 0)
+                return -1;
+        }
+        if (done)
+            break;
+    }
+    h->upos += len;
+    h->data_bytes += len;
+    h->secs += now() - start;
+    return 0;
+}
 
 int gzwrite(gzFile file, const void *buf, unsigned int len) {
     static original_gzwrite_t original_gzwrite = NULL;
@@ -348,49 +563,341 @@ int gzwrite(gzFile file, const void *buf, unsigned int len) {
         fprintf(stderr, "gzwrite: %p, %u bytes\n", (void*)file, len);
     }
 
-    int slot = find_handle(file);
-    if (slot < 0){
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
         return original_gzwrite(file, buf, len);
     }
+    // Like zlib, 0 on errors
+    if (h->mode != WRITE_STREAM){
+        return 0;
+    }
+    if (len > INT_MAX){
+        set_error(h, Z_DATA_ERROR, "requested length does not fit in int");
+        return 0;
+    }
+    return compress_data(h, buf, len, ZSTD_e_continue) < 0 ? 0 : (int)len;
+}
 
-    zstd_handle_t *h = handles[slot];
-    if (!h->writing){
+z_size_t gzfwrite(voidpc buf, z_size_t size, z_size_t nitems, gzFile file) {
+    static original_gzfwrite_t original_gzfwrite = NULL;
+    if (!original_gzfwrite) original_gzfwrite = dlsym(RTLD_NEXT, "gzfwrite");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzfwrite(buf, size, nitems, file);
+    }
+    if (h->mode != WRITE_STREAM){
+        return 0;
+    }
+    z_size_t len = nitems * size;
+    if (size && len / size != nitems){
+        set_error(h, Z_STREAM_ERROR, "request does not fit in a size_t");
+        return 0;
+    }
+    if (len == 0){
+        return 0;
+    }
+    return compress_data(h, buf, len, ZSTD_e_continue) < 0 ? 0 : nitems;
+}
+
+int gzputc(gzFile file, int c) {
+    static original_gzputc_t original_gzputc = NULL;
+    if (!original_gzputc) original_gzputc = dlsym(RTLD_NEXT, "gzputc");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzputc(file, c);
+    }
+    unsigned char byte = c;
+    if (h->mode != WRITE_STREAM || compress_data(h, &byte, 1, ZSTD_e_continue) < 0){
+        return -1;
+    }
+    return byte;
+}
+
+int gzputs(gzFile file, const char *s) {
+    static original_gzputs_t original_gzputs = NULL;
+    if (!original_gzputs) original_gzputs = dlsym(RTLD_NEXT, "gzputs");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzputs(file, s);
+    }
+    if (h->mode != WRITE_STREAM){
+        return -1;
+    }
+    size_t len = strlen(s);
+    if (len > INT_MAX){
+        set_error(h, Z_STREAM_ERROR, "string length does not fit in int");
+        return -1;
+    }
+    return compress_data(h, s, len, ZSTD_e_continue) < 0 ? -1 : (int)len;
+}
+
+// No length limit, unlike zlib's, which fails past its buffer size. Returns
+// the bytes written, or a negative zlib error
+static int printf_handle(zstd_handle_t *h, const char *format, va_list va){
+    if (h->mode != WRITE_STREAM || h->err != Z_OK){
+        return Z_STREAM_ERROR;
+    }
+
+    char stack[8192];
+    va_list copy;
+    va_copy(copy, va);
+    int len = vsnprintf(stack, sizeof(stack), format, copy);
+    va_end(copy);
+    if (len <= 0){
         return 0;
     }
 
-    if (grow(h, len) < 0){
-        return 0; /* gzwrite returns 0 on error */
+    char *text = stack;
+    if ((size_t)len >= sizeof(stack)){
+        text = malloc((size_t)len + 1);
+        if (!text){
+            set_error(h, Z_MEM_ERROR, "out of memory");
+            return Z_MEM_ERROR;
+        }
+        vsnprintf(text, (size_t)len + 1, format, va);
     }
+    int ret = compress_data(h, text, len, ZSTD_e_continue) < 0 ? h->err : len;
+    if (text != stack){
+        free(text);
+    }
+    return ret;
+}
 
-    memcpy(h->data + h->size, buf, len);
-    h->size += len;
-    return len;
+int gzvprintf(gzFile file, const char *format, va_list va) {
+    static original_gzvprintf_t original_gzvprintf = NULL;
+    if (!original_gzvprintf) original_gzvprintf = dlsym(RTLD_NEXT, "gzvprintf");
+
+    zstd_handle_t *h = get_handle(file);
+    return h ? printf_handle(h, format, va) : original_gzvprintf(file, format, va);
+}
+
+// A variadic call can't be passed on, so zlib's handles go to its gzvprintf
+int gzprintf(gzFile file, const char *format, ...) {
+    static original_gzvprintf_t original_gzvprintf = NULL;
+    if (!original_gzvprintf) original_gzvprintf = dlsym(RTLD_NEXT, "gzvprintf");
+
+    va_list va;
+    va_start(va, format);
+    zstd_handle_t *h = get_handle(file);
+    int ret = h ? printf_handle(h, format, va) : original_gzvprintf(file, format, va);
+    va_end(va);
+    return ret;
+}
+
+// Z_FINISH ends the frame (the next write starts a new one, as zlib starts a
+// new gzip member); the other flushes write out everything so far, so a
+// reader can decode it before gzclose
+int gzflush(gzFile file, int flush) {
+    static original_gzflush_t original_gzflush = NULL;
+    if (!original_gzflush) original_gzflush = dlsym(RTLD_NEXT, "gzflush");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzflush(file, flush);
+    }
+    if (h->mode != WRITE_STREAM || h->err != Z_OK || flush < Z_NO_FLUSH || flush > Z_FINISH){
+        return Z_STREAM_ERROR;
+    }
+    if (flush == Z_NO_FLUSH){
+        return Z_OK;
+    }
+    ZSTD_EndDirective op = flush == Z_FINISH ? ZSTD_e_end : ZSTD_e_flush;
+    return compress_data(h, NULL, 0, op) < 0 ? h->err : Z_OK;
 }
 
 
 /* Read */
+
+// Keeps the bytes just decoded at dpos that fall in the first cache_limit
+// bytes of the file
+static void cache_add(zstd_handle_t *h, const unsigned char *data, size_t n){
+    z_off64_t cached = h->cache_len;
+    if (h->cache_len >= h->cache_limit || h->dpos > cached || h->dpos + (z_off64_t)n <= cached){
+        return;
+    }
+    if (!h->cache){
+        // Pages are only touched as the cache fills
+        h->cache = malloc(h->cache_limit);
+        if (!h->cache){
+            h->cache_limit = 0;
+            return;
+        }
+    }
+    size_t from = cached - h->dpos;
+    size_t len = n - from;
+    if (len > h->cache_limit - h->cache_len){
+        len = h->cache_limit - h->cache_len;
+    }
+    memcpy(h->cache + h->cache_len, data + from, len);
+    h->cache_len += len;
+}
+
+// Decodes up to cap bytes into dst from dpos on, reading the file buf_size
+// bytes at a time. Returns how many (fewer only at the end of the data), 0 at
+// the end, -1 on error. A file that ends inside a frame (cut short, or never
+// closed by gzclose) is an error once the bytes before the cut are returned,
+// never a quiet end of file
+static ssize_t decode(zstd_handle_t *h, unsigned char *dst, size_t cap){
+    double start = now();
+    ZSTD_outBuffer out = {dst, cap, 0};
+    while (out.pos < out.size && !h->end){
+        if (h->in_pos == h->in_end){
+            if (h->raw_eof){
+                if (!h->frame_open){
+                    h->end = 1;
+                } else if (out.pos == 0){
+                    set_error(h, Z_DATA_ERROR, "unexpected end of file");
+                    return -1;
+                }
+                break;
+            }
+            ssize_t got = read(h->fd, h->in, h->buf_size);
+            if (got < 0){
+                if (errno == EINTR)
+                    continue;
+                set_error(h, Z_ERRNO, strerror(errno));
+                return -1;
+            }
+            h->raw_eof = got == 0;
+            h->in_pos = 0;
+            h->in_end = got;
+            h->raw_bytes += got;
+            continue;
+        }
+
+        ZSTD_inBuffer in = {h->in, h->in_end, h->in_pos};
+        size_t hint = ZSTD_decompressStream(h->dctx, &out, &in);
+        h->in_pos = in.pos;
+        if (ZSTD_isError(hint)){
+            set_error(h, Z_DATA_ERROR, ZSTD_getErrorName(hint));
+            return -1;
+        }
+        // 0 once a frame is decoded and flushed; another frame may follow
+        h->frame_open = hint != 0;
+    }
+
+    cache_add(h, dst, out.pos);
+    h->dpos += out.pos;
+    h->data_bytes += out.pos;
+    h->secs += now() - start;
+    return out.pos;
+}
+
+// Back to the first frame, for a read behind the decoder that the cache
+// doesn't cover. Costs decoding the file again up to the target
+static int restart(zstd_handle_t *h){
+    if (lseek(h->fd, h->start, SEEK_SET) < 0){
+        set_error(h, Z_ERRNO, strerror(errno));
+        return -1;
+    }
+    ZSTD_DCtx_reset(h->dctx, ZSTD_reset_session_only);
+    h->in_pos = h->in_end = 0;
+    h->raw_eof = h->frame_open = h->end = 0;
+    h->dpos = 0;
+    h->out_len = 0;
+    h->rewinds++;
+    return 0;
+}
+
+// Points *ptr at the bytes from upos on, in the cache or in out, decoding
+// more when needed (and skipping ahead after a forward seek). Returns how
+// many there are, 0 at the end of the data, -1 on error
+static ssize_t peek(zstd_handle_t *h, const unsigned char **ptr){
+    if (h->err != Z_OK || alloc_buffers(h) < 0){
+        return -1;
+    }
+    for (;;){
+        if (h->upos < (z_off64_t)h->cache_len){
+            *ptr = h->cache + h->upos;
+            return h->cache_len - h->upos;
+        }
+        // out holds the bytes from dpos - out_len to dpos, so a short seek
+        // back stays in it; anything before means starting over
+        if (h->upos < h->dpos - (z_off64_t)h->out_len && restart(h) < 0){
+            return -1;
+        }
+        if (h->upos < h->dpos){
+            *ptr = h->out + h->out_len - (h->dpos - h->upos);
+            return h->dpos - h->upos;
+        }
+        if (h->end){
+            // Like zlib, a seek past the end leaves the position at the end
+            h->upos = h->dpos;
+            return 0;
+        }
+        ssize_t n = decode(h, h->out, h->buf_size);
+        if (n < 0){
+            return -1;
+        }
+        // At the end nothing was written, and out still ends at dpos
+        if (n > 0){
+            h->out_len = n;
+        }
+    }
+}
+
+// Copies up to len bytes from upos into buf; fewer only at the end. Large
+// reads with nothing decoded ahead go straight into buf. Returns the count,
+// or -1 (dropping what was copied, as zlib does)
+static ssize_t read_data(zstd_handle_t *h, unsigned char *buf, size_t len){
+    if (h->err != Z_OK || alloc_buffers(h) < 0){
+        return -1;
+    }
+    size_t got = 0;
+    while (got < len){
+        if (h->nback > 0){
+            buf[got++] = h->back[--h->nback];
+            h->upos++;
+            continue;
+        }
+        if (h->upos >= (z_off64_t)h->cache_len && h->upos == h->dpos && !h->end && len - got >= h->buf_size){
+            // out no longer ends at dpos once the decoder writes elsewhere
+            h->out_len = 0;
+            ssize_t n = decode(h, buf + got, len - got);
+            if (n < 0)
+                return -1;
+            got += n;
+            h->upos += n;
+            continue;
+        }
+
+        const unsigned char *src;
+        ssize_t n = peek(h, &src);
+        if (n < 0){
+            return -1;
+        }
+        if (n == 0){
+            h->past = 1;
+            break;
+        }
+        if ((size_t)n > len - got){
+            n = len - got;
+        }
+        memcpy(buf + got, src, n);
+        got += n;
+        h->upos += n;
+    }
+    return got;
+}
 
 int gzread(gzFile file, voidp buf, unsigned len) {
     static original_gzread_t original_gzread = NULL;
     if (!original_gzread) original_gzread = dlsym(RTLD_NEXT, "gzread");
 
     int got;
-    int slot = find_handle(file);
-    if (slot < 0){
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
         got = original_gzread(file, buf, len);
-    } else if (handles[slot]->writing){
+    } else if (h->mode != READ_STREAM){
+        got = -1;
+    } else if (len > INT_MAX){
+        set_error(h, Z_STREAM_ERROR, "request does not fit in an int");
         got = -1;
     } else{
-        // gzread returns an int, so serve at most INT_MAX per call
-        // pos can be past the end after a gzseek
-        zstd_handle_t *h = handles[slot];
-        size_t n = h->pos < h->size ? h->size - h->pos : 0;
-        if (n > len) n = len;
-        if (n > INT_MAX) n = INT_MAX;
-        memcpy(buf, h->data + h->pos, n);
-        h->pos += n;
-        if (n < len) h->eof = 1;
-        got = n;
+        got = read_data(h, buf, len);
     }
 
     if (debug_enabled()){
@@ -399,21 +906,47 @@ int gzread(gzFile file, voidp buf, unsigned len) {
     return got;
 }
 
-// Like zlib, -1 at the end of the data
+z_size_t gzfread(voidp buf, z_size_t size, z_size_t nitems, gzFile file) {
+    static original_gzfread_t original_gzfread = NULL;
+    if (!original_gzfread) original_gzfread = dlsym(RTLD_NEXT, "gzfread");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzfread(buf, size, nitems, file);
+    }
+    if (h->mode != READ_STREAM){
+        return 0;
+    }
+    z_size_t len = nitems * size;
+    if (size && len / size != nitems){
+        set_error(h, Z_STREAM_ERROR, "request does not fit in a size_t");
+        return 0;
+    }
+    ssize_t got = len ? read_data(h, buf, len) : 0;
+    return got > 0 ? (z_size_t)got / size : 0;
+}
+
+// Like zlib, -1 at the end of the data or on an error
 static int getc_handle(gzFile file, original_gzgetc_t original){
-    int slot = find_handle(file);
-    if (slot < 0){
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
         return original(file);
     }
-    zstd_handle_t *h = handles[slot];
-    if (h->writing){
+    if (h->mode != READ_STREAM){
         return -1;
     }
-    if (h->pos >= h->size){
-        h->eof = 1;
+    if (h->nback > 0){
+        h->upos++;
+        return h->back[--h->nback];
+    }
+    const unsigned char *src;
+    ssize_t n = peek(h, &src);
+    if (n <= 0){
+        if (n == 0) h->past = 1;
         return -1;
     }
-    return h->data[h->pos++];
+    h->upos++;
+    return *src;
 }
 
 int gzgetc(gzFile file) {
@@ -431,36 +964,117 @@ int gzgetc_(gzFile file) {
     return getc_handle(file, original_gzgetc_);
 }
 
+// The character needn't be the one just read; it is returned by the next read
+int gzungetc(int c, gzFile file) {
+    static original_gzungetc_t original_gzungetc = NULL;
+    if (!original_gzungetc) original_gzungetc = dlsym(RTLD_NEXT, "gzungetc");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzungetc(c, file);
+    }
+    if (h->mode != READ_STREAM || h->err != Z_OK || c < 0){
+        return -1;
+    }
+    if (h->nback == UNGET_SIZE){
+        set_error(h, Z_DATA_ERROR, "out of room to push characters");
+        return -1;
+    }
+    h->back[h->nback++] = (unsigned char)c;
+    h->upos--;
+    h->past = 0;
+    return c;
+}
+
+// As zlib's: reads up to len - 1 bytes, stopping after a newline, and NUL
+// terminates them. NULL at the end of the data with nothing read, or on error
+char *gzgets(gzFile file, char *buf, int len) {
+    static original_gzgets_t original_gzgets = NULL;
+    if (!original_gzgets) original_gzgets = dlsym(RTLD_NEXT, "gzgets");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzgets(file, buf, len);
+    }
+    if (h->mode != READ_STREAM || h->err != Z_OK || !buf || len < 1){
+        return NULL;
+    }
+
+    char *str = buf;
+    size_t left = (size_t)len - 1;
+    while (left > 0){
+        if (h->nback > 0){
+            char c = h->back[--h->nback];
+            h->upos++;
+            *buf++ = c;
+            left--;
+            if (c == '\n')
+                break;
+            continue;
+        }
+        const unsigned char *src;
+        ssize_t n = peek(h, &src);
+        if (n < 0){
+            return NULL;
+        }
+        if (n == 0){
+            h->past = 1;
+            break;
+        }
+        if ((size_t)n > left){
+            n = left;
+        }
+        const unsigned char *eol = memchr(src, '\n', n);
+        if (eol){
+            n = eol - src + 1;
+        }
+        memcpy(buf, src, n);
+        buf += n;
+        left -= n;
+        h->upos += n;
+        if (eol)
+            break;
+    }
+    if (buf == str){
+        return NULL;
+    }
+    *buf = '\0';
+    return str;
+}
+
 
 /* Seek and state */
 
-// Same rules as zlib: no SEEK_END, reads can move anywhere at or after the
-// start, writes only forward (the gap is filled with zeros). Returns the new
-// offset in the uncompressed data, or -1
+// Same rules as zlib: no SEEK_END. Reads move anywhere from 0 on, lazily:
+// the next read skips ahead, or restarts from the first frame when the target
+// is behind both the decoder and the header cache. Writes only move forward,
+// compressing zeros up to the new offset. Returns the new offset, or -1
 static z_off64_t seek_handle(zstd_handle_t *h, z_off64_t offset, int whence){
-    z_off64_t current = h->writing ? (z_off64_t)h->size : (z_off64_t)h->pos;
-    if (whence == SEEK_CUR){
-        offset += current;
-    } else if (whence != SEEK_SET){
+    if (h->err != Z_OK || (whence != SEEK_SET && whence != SEEK_CUR)){
         return -1;
+    }
+    if (whence == SEEK_CUR){
+        offset += h->upos;
     }
     if (offset < 0){
         return -1;
     }
 
-    if (h->writing){
-        if (offset < current){
+    if (h->mode == WRITE_STREAM){
+        static const unsigned char zeros[65536];
+        if (offset < h->upos){
             return -1;
         }
-        size_t gap = offset - current;
-        if (grow(h, gap) < 0){
-            return -1;
+        while (h->upos < offset){
+            z_off64_t n = offset - h->upos;
+            if (n > (z_off64_t)sizeof(zeros)) n = sizeof(zeros);
+            if (compress_data(h, zeros, n, ZSTD_e_continue) < 0)
+                return -1;
         }
-        memset(h->data + h->size, 0, gap);
-        h->size += gap;
     } else{
-        h->pos = offset;
-        h->eof = 0;
+        h->upos = offset;
+        h->nback = 0;
+        h->past = 0;
     }
     return offset;
 }
@@ -469,8 +1083,8 @@ z_off_t gzseek(gzFile file, z_off_t offset, int whence) {
     static original_gzseek_t original_gzseek = NULL;
     if (!original_gzseek) original_gzseek = dlsym(RTLD_NEXT, "gzseek");
 
-    int slot = find_handle(file);
-    z_off_t ret = slot < 0 ? original_gzseek(file, offset, whence) : (z_off_t)seek_handle(handles[slot], offset, whence);
+    zstd_handle_t *h = get_handle(file);
+    z_off_t ret = h ? (z_off_t)seek_handle(h, offset, whence) : original_gzseek(file, offset, whence);
 
     if (debug_enabled()){
         fprintf(stderr, "gzseek: %p, %lld whence %d -> %lld\n", (void*)file, (long long)offset, whence, (long long)ret);
@@ -482,8 +1096,8 @@ z_off64_t gzseek64(gzFile file, z_off64_t offset, int whence) {
     static original_gzseek64_t original_gzseek64 = NULL;
     if (!original_gzseek64) original_gzseek64 = dlsym(RTLD_NEXT, "gzseek64");
 
-    int slot = find_handle(file);
-    z_off64_t ret = slot < 0 ? original_gzseek64(file, offset, whence) : seek_handle(handles[slot], offset, whence);
+    zstd_handle_t *h = get_handle(file);
+    z_off64_t ret = h ? seek_handle(h, offset, whence) : original_gzseek64(file, offset, whence);
 
     if (debug_enabled()){
         fprintf(stderr, "gzseek64: %p, %lld whence %d -> %lld\n", (void*)file, (long long)offset, whence, (long long)ret);
@@ -491,28 +1105,60 @@ z_off64_t gzseek64(gzFile file, z_off64_t offset, int whence) {
     return ret;
 }
 
+int gzrewind(gzFile file) {
+    static original_gzrewind_t original_gzrewind = NULL;
+    if (!original_gzrewind) original_gzrewind = dlsym(RTLD_NEXT, "gzrewind");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzrewind(file);
+    }
+    if (h->mode != READ_STREAM){
+        return -1;
+    }
+    return seek_handle(h, 0, SEEK_SET) < 0 ? -1 : 0;
+}
+
 z_off_t gztell(gzFile file) {
     static original_gztell_t original_gztell = NULL;
     if (!original_gztell) original_gztell = dlsym(RTLD_NEXT, "gztell");
 
-    int slot = find_handle(file);
-    if (slot < 0){
-        return original_gztell(file);
-    }
-    zstd_handle_t *h = handles[slot];
-    return h->writing ? (z_off_t)h->size : (z_off_t)h->pos;
+    zstd_handle_t *h = get_handle(file);
+    return h ? (z_off_t)h->upos : original_gztell(file);
 }
 
 z_off64_t gztell64(gzFile file) {
     static original_gztell64_t original_gztell64 = NULL;
     if (!original_gztell64) original_gztell64 = dlsym(RTLD_NEXT, "gztell64");
 
-    int slot = find_handle(file);
-    if (slot < 0){
-        return original_gztell64(file);
+    zstd_handle_t *h = get_handle(file);
+    return h ? h->upos : original_gztell64(file);
+}
+
+// Compressed offset in the file, as zlib reports it: for reads, of the next
+// byte the decoder will take
+static z_off64_t offset_handle(zstd_handle_t *h){
+    off_t pos = lseek(h->fd, 0, SEEK_CUR);
+    if (pos < 0){
+        return -1;
     }
-    zstd_handle_t *h = handles[slot];
-    return h->writing ? (z_off64_t)h->size : (z_off64_t)h->pos;
+    return h->mode == READ_STREAM ? pos - (off_t)(h->in_end - h->in_pos) : pos;
+}
+
+z_off_t gzoffset(gzFile file) {
+    static original_gztell_t original_gzoffset = NULL;
+    if (!original_gzoffset) original_gzoffset = dlsym(RTLD_NEXT, "gzoffset");
+
+    zstd_handle_t *h = get_handle(file);
+    return h ? (z_off_t)offset_handle(h) : original_gzoffset(file);
+}
+
+z_off64_t gzoffset64(gzFile file) {
+    static original_gztell64_t original_gzoffset64 = NULL;
+    if (!original_gzoffset64) original_gzoffset64 = dlsym(RTLD_NEXT, "gzoffset64");
+
+    zstd_handle_t *h = get_handle(file);
+    return h ? offset_handle(h) : original_gzoffset64(file);
 }
 
 // Like zlib, set only once a read has asked for more than was left
@@ -520,50 +1166,83 @@ int gzeof(gzFile file) {
     static original_gzeof_t original_gzeof = NULL;
     if (!original_gzeof) original_gzeof = dlsym(RTLD_NEXT, "gzeof");
 
-    int slot = find_handle(file);
-    return slot < 0 ? original_gzeof(file) : handles[slot]->eof;
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzeof(file);
+    }
+    return h->mode == READ_STREAM ? h->past : 0;
 }
 
-// Errors on the library's handles are reported by the call that fails, so
-// there's never one pending here
+// The library's handles always decompress
+int gzdirect(gzFile file) {
+    static original_gzdirect_t original_gzdirect = NULL;
+    if (!original_gzdirect) original_gzdirect = dlsym(RTLD_NEXT, "gzdirect");
+
+    zstd_handle_t *h = get_handle(file);
+    return h ? 0 : original_gzdirect(file);
+}
+
 const char *gzerror(gzFile file, int *errnum) {
     static original_gzerror_t original_gzerror = NULL;
     if (!original_gzerror) original_gzerror = dlsym(RTLD_NEXT, "gzerror");
 
-    if (find_handle(file) < 0){
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
         return original_gzerror(file, errnum);
     }
     if (errnum){
-        *errnum = Z_OK;
+        *errnum = h->err;
     }
-    return "";
+    if (h->err == Z_MEM_ERROR){
+        return "out of memory";
+    }
+    return h->msg ? h->msg : "";
+}
+
+// As in zlib, a reader also forgets it reached the end of the file, so it
+// can go on reading a file that has grown (e.g. after the writer's gzflush)
+void gzclearerr(gzFile file) {
+    static original_gzclearerr_t original_gzclearerr = NULL;
+    if (!original_gzclearerr) original_gzclearerr = dlsym(RTLD_NEXT, "gzclearerr");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        original_gzclearerr(file);
+        return;
+    }
+    if (h->mode == READ_STREAM){
+        h->past = 0;
+        h->raw_eof = 0;
+        h->end = 0;
+    }
+    h->err = Z_OK;
+    free(h->msg);
+    h->msg = NULL;
 }
 
 
 /* Close */
 
-static int close_write(zstd_handle_t *h){
-    int ret = Z_OK;
-    double start = now();
-    size_t bound = ZSTD_compressBound(h->size);
-    void *out = malloc(bound);
-    size_t out_size = out ? ZSTD_compress(out, bound, h->data, h->size, h->level) : 0;
-
-    if (!out || ZSTD_isError(out_size)){
-        fprintf(stderr, "zstd_lib: compress failed: %s\n", out ? ZSTD_getErrorName(out_size) : "out of memory");
-        ret = Z_MEM_ERROR;
-    } else if (write_all(h->fd, out, out_size) < 0){
-        perror("zstd_lib: write");
-        ret = Z_ERRNO;
+// Ends the frame and closes the file; one summary line per file, always
+// printed (scripts/lib/common.sh sums them)
+static int close_handle(zstd_handle_t *h){
+    int ret = h->err;
+    if (h->mode == WRITE_STREAM){
+        if (ret == Z_OK && compress_data(h, NULL, 0, ZSTD_e_end) < 0){
+            ret = h->err;
+        }
+        if (ret == Z_OK){
+            fprintf(stderr, "zstd_lib: level %d, %lld -> %lld bytes, %.2f s\n", h->level, h->data_bytes, h->raw_bytes, h->secs);
+        }
+        put_cctx(h->cctx);
     } else{
-        // One summary line per file written, always printed
-        fprintf(stderr, "zstd_lib: level %d, %zu -> %zu bytes, %.2f s\n", h->level, h->size, out_size, now() - start);
+        fprintf(stderr, "zstd_lib: read, %lld -> %lld bytes, %d rewinds, %.2f s\n", h->raw_bytes, h->data_bytes, h->rewinds, h->secs);
+        put_dctx(h->dctx);
     }
-
-    free(out);
     if (close(h->fd) < 0 && ret == Z_OK){
         ret = Z_ERRNO;
     }
+    free_handle(h);
     return ret;
 }
 
@@ -575,15 +1254,28 @@ int gzclose(gzFile file) {
         fprintf(stderr, "gzclose: %p\n", (void*)file);
     }
 
-    int slot = find_handle(file);
-    if (slot < 0){
-        return original_gzclose(file);
-    }
+    zstd_handle_t *h = get_handle(file);
+    return h ? close_handle(h) : original_gzclose(file);
+}
 
-    zstd_handle_t *h = handles[slot];
-    handles[slot] = NULL;
-    int ret = h->writing ? close_write(h) : Z_OK;
-    free(h->data);
-    free(h);
-    return ret;
+int gzclose_r(gzFile file) {
+    static original_gzclose_t original_gzclose_r = NULL;
+    if (!original_gzclose_r) original_gzclose_r = dlsym(RTLD_NEXT, "gzclose_r");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzclose_r(file);
+    }
+    return h->mode == READ_STREAM ? close_handle(h) : Z_STREAM_ERROR;
+}
+
+int gzclose_w(gzFile file) {
+    static original_gzclose_t original_gzclose_w = NULL;
+    if (!original_gzclose_w) original_gzclose_w = dlsym(RTLD_NEXT, "gzclose_w");
+
+    zstd_handle_t *h = get_handle(file);
+    if (!h){
+        return original_gzclose_w(file);
+    }
+    return h->mode == WRITE_STREAM ? close_handle(h) : Z_STREAM_ERROR;
 }
