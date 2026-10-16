@@ -8,6 +8,8 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
+#include <limits.h>
+#include <string.h>
 #include <sys/stat.h>
 
 
@@ -31,6 +33,7 @@ typedef pid_t (*original_fork_t)(void);
 typedef int (*original_dup_t)(int fd);
 typedef int (*original_dup2_t)(int oldfd, int newfd);
 
+// Per thread, so a thread that is logging doesn't drop the lines of others
 static __thread int in_log = 0;
 static int log_fd = -1;
 
@@ -39,16 +42,18 @@ static void log_msg(const char *fmt, ...) {
     in_log = 1;
 
     if (log_fd == -1) {
-        log_fd = syscall(SYS_open, LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (log_fd < 0) {
+        int fd = syscall(SYS_open, LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) {
             in_log = 0;
             return;
         }
+        // Another thread may have opened it first
+        if (!__sync_bool_compare_and_swap(&log_fd, -1, fd)) syscall(SYS_close, fd);
     }
 
-    char msg[512];
+    char msg[PATH_MAX];
     char timestamp[64];
-    char logbuf[704];
+    char logbuf[PATH_MAX + 128];
 
     time_t now = time(NULL);
     struct tm tm_info;
@@ -64,13 +69,16 @@ static void log_msg(const char *fmt, ...) {
         int total = snprintf(
             logbuf,
             sizeof(logbuf),
-            "%s[pid=%ld] %s",
+            "%s[pid=%ld tid=%ld] %s",
             timestamp,
             (long)getpid(),
+            (long)syscall(SYS_gettid),
             msg
         );
         if (total > 0) {
             size_t len = (size_t)total < sizeof(logbuf) ? (size_t)total : sizeof(logbuf) - 1;
+            // Truncation drops the newline; put it back so lines never merge
+            logbuf[len - 1] = '\n';
             syscall(SYS_write, log_fd, logbuf, len);
         }
     }
@@ -93,8 +101,9 @@ static int get_cmdline(char *out, size_t out_size) {
 
     if (bytes > 0) {
         out[bytes] = '\0';
+        // Arguments are NUL-separated and may hold newlines (python -c)
         for (ssize_t i = 0; i < bytes; i++) {
-            if (out[i] == '\0') {
+            if ((unsigned char)out[i] < ' ') {
                 out[i] = ' ';
             }
         }
@@ -102,9 +111,18 @@ static int get_cmdline(char *out, size_t out_size) {
     return 0;
 }
 
+// The cwd is the Nextflow work dir (opens use relative paths) and the parent
+// pid ties an exec'd child to the process that started it
 __attribute__((constructor)) static void logger_init() {
+    char exe[PATH_MAX] = "?";
+    char cwd[PATH_MAX] = "?";
+    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (len > 0) exe[len] = '\0';
+    if (!getcwd(cwd, sizeof(cwd))) strcpy(cwd, "?");
+
     get_cmdline(cmdline, sizeof(cmdline));
-    log_msg("Initializing logger library - %s\n", cmdline);
+    log_msg("Initializing logger library - exe='%s' cwd='%s' ppid=%ld cmdline='%s'\n",
+            exe, cwd, (long)getppid(), cmdline);
 }
 
 
@@ -147,8 +165,31 @@ int open64(const char *path, int flags, ...) {
     }
     va_end(args);
 
-    log_msg("open64('%s', flags=0x%x) = %d\\n", path, flags, fd);
+    log_msg("open64('%s', flags=0x%x) = %d\n", path, flags, fd);
     return fd;
+}
+
+
+// Fortified open64 (_FORTIFY_SOURCE), called without a mode
+typedef int (*original___open64_2_t)(const char *path, int flags);
+int __open64_2(const char *path, int flags) {
+    static original___open64_2_t original___open64_2 = NULL;
+    if (!original___open64_2) original___open64_2 = (original___open64_2_t)dlsym(RTLD_NEXT, "__open64_2");
+    int fd = -1;
+    if (original___open64_2) fd = original___open64_2(path, flags);
+    log_msg("__open64_2('%s', flags=0x%x) = %d\n", path, flags, fd);
+    return fd;
+}
+
+
+typedef FILE *(*original_fopen_t)(const char *path, const char *mode);
+FILE *fopen(const char *path, const char *mode) {
+    static original_fopen_t original_fopen = NULL;
+    if (!original_fopen) original_fopen = (original_fopen_t)dlsym(RTLD_NEXT, "fopen");
+    FILE *f = NULL;
+    if (original_fopen) f = original_fopen(path, mode);
+    log_msg("fopen('%s', mode='%s') = %p\n", path, mode, (void*)f);
+    return f;
 }
 
 
@@ -158,7 +199,7 @@ FILE *fopen64(const char *path, const char *mode) {
     if (!original_fopen64) original_fopen64 = (original_fopen64_t)dlsym(RTLD_NEXT, "fopen64");
     FILE *f = NULL;
     if (original_fopen64) f = original_fopen64(path, mode);
-    log_msg("fopen64('%s', mode='%s') = %p\\n", path, mode, (void*)f);
+    log_msg("fopen64('%s', mode='%s') = %p\n", path, mode, (void*)f);
     return f;
 }
 
@@ -169,7 +210,7 @@ int stat64(const char *path, struct stat64 *buf) {
     if (!original_stat64) original_stat64 = (original_stat64_t)dlsym(RTLD_NEXT, "stat64");
     int res = -1;
     if (original_stat64) res = original_stat64(path, buf);
-    log_msg("stat64('%s') = %d\\n", path, res);
+    log_msg("stat64('%s') = %d\n", path, res);
     return res;
 }
 
@@ -180,7 +221,7 @@ int fstat64(int fd, struct stat64 *buf) {
     if (!original_fstat64) original_fstat64 = (original_fstat64_t)dlsym(RTLD_NEXT, "fstat64");
     int res = -1;
     if (original_fstat64) res = original_fstat64(fd, buf);
-    log_msg("fstat64(fd=%d) = %d\\n", fd, res);
+    log_msg("fstat64(fd=%d) = %d\n", fd, res);
     return res;
 }
 
@@ -294,6 +335,29 @@ int openat(int dirfd, const char *path, int flags, ...) {
 }
 
 
+int openat64(int dirfd, const char *path, int flags, ...) {
+    static original_openat_t original_openat64 = NULL;
+    if (!original_openat64) original_openat64 = (original_openat_t)dlsym(RTLD_NEXT, "openat64");
+
+    va_list args;
+    va_start(args, flags);
+    int fd = -1;
+
+    if (flags & O_CREAT) {
+        mode_t mode = va_arg(args, mode_t);
+        if (original_openat64)
+            fd = original_openat64(dirfd, path, flags, mode);
+    } else {
+        if (original_openat64)
+            fd = original_openat64(dirfd, path, flags);
+    }
+    va_end(args);
+
+    log_msg("openat64(dirfd=%d, path='%s', flags=0x%x) = %d\n", dirfd, path, flags, fd);
+    return fd;
+}
+
+
 ssize_t pread64(int fd, void *buf, size_t count, off_t offset) {
     static original_pread64_t original_pread64 = NULL;
     if (!original_pread64) original_pread64 = (original_pread64_t)dlsym(RTLD_NEXT, "pread64");
@@ -384,4 +448,69 @@ int dup2(int oldfd, int newfd) {
     int result = original_dup2(oldfd, newfd);
     log_msg("dup2(oldfd=%d, newfd=%d) = %d\n", oldfd, newfd, result);
     return result;
+}
+
+
+typedef int (*original_rename_t)(const char *oldpath, const char *newpath);
+int rename(const char *oldpath, const char *newpath) {
+    static original_rename_t original_rename = NULL;
+    if (!original_rename) original_rename = (original_rename_t)dlsym(RTLD_NEXT, "rename");
+
+    int result = -1;
+    if (original_rename) result = original_rename(oldpath, newpath);
+    log_msg("rename('%s', '%s') = %d\n", oldpath, newpath, result);
+    return result;
+}
+
+
+/* gz API */
+
+// Marks the opens that go through a dynamically linked zlib (FSL, MRtrix);
+// ANTs' compiled-in zlib and Python's gzip never reach these. gzFile is an
+// opaque pointer, so zlib.h isn't needed
+typedef void *(*original_gzopen_t)(const char *path, const char *mode);
+typedef void *(*original_gzdopen_t)(int fd, const char *mode);
+
+// RTLD_NEXT misses a libz that was dlopen'd with RTLD_LOCAL (e.g. by a Python
+// extension), so fall back to the libz.so.1 that is already loaded
+static void *gz_symbol(const char *name) {
+    void *sym = dlsym(RTLD_NEXT, name);
+    if (!sym) {
+        void *libz = dlopen("libz.so.1", RTLD_LAZY | RTLD_NOLOAD);
+        if (libz) sym = dlsym(libz, name);
+    }
+    return sym;
+}
+
+
+void *gzopen(const char *path, const char *mode) {
+    static original_gzopen_t original_gzopen = NULL;
+    if (!original_gzopen) original_gzopen = (original_gzopen_t)gz_symbol("gzopen");
+
+    void *file = NULL;
+    if (original_gzopen) file = original_gzopen(path, mode);
+    log_msg("gzopen('%s', mode='%s') = %p\n", path, mode, file);
+    return file;
+}
+
+
+void *gzopen64(const char *path, const char *mode) {
+    static original_gzopen_t original_gzopen64 = NULL;
+    if (!original_gzopen64) original_gzopen64 = (original_gzopen_t)gz_symbol("gzopen64");
+
+    void *file = NULL;
+    if (original_gzopen64) file = original_gzopen64(path, mode);
+    log_msg("gzopen64('%s', mode='%s') = %p\n", path, mode, file);
+    return file;
+}
+
+
+void *gzdopen(int fd, const char *mode) {
+    static original_gzdopen_t original_gzdopen = NULL;
+    if (!original_gzdopen) original_gzdopen = (original_gzdopen_t)gz_symbol("gzdopen");
+
+    void *file = NULL;
+    if (original_gzdopen) file = original_gzdopen(fd, mode);
+    log_msg("gzdopen(fd=%d, mode='%s') = %p\n", fd, mode, file);
+    return file;
 }
