@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DATASET" ]]; then
-    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--ssd]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full|default] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--ssd]" >&2
     exit 1
 fi
 check_lib_options
@@ -33,14 +33,22 @@ case "$PIPELINE" in
                        --run_pft_tracking false --run_local_tracking false) ;;
     full)
         pipeline_args=(--run_pft_tracking false --run_eddy false) ;;
+    default)
+        # TractoFlow's own defaults: DWI denoising, topup (for subjects with a
+        # rev_b0), eddy and PFT tracking on; T1 denoising and local tracking off
+        pipeline_args=() ;;
     *)
-        echo "Error: --pipeline must be minimal or full (got: $PIPELINE)" >&2
+        echo "Error: --pipeline must be minimal, full or default (got: $PIPELINE)" >&2
         exit 1 ;;
 esac
 
+# default only adds the profile (eddy on CUDA), keeping TractoFlow's tracking
 if [[ "$GPU" == true ]]; then
-    pipeline_args+=(-profile use_gpu --run_local_tracking true --local_seeding npv
-                    --local_nbr_seeds 15 --local_batch_size_gpu 40000)
+    pipeline_args+=(-profile use_gpu)
+    if [[ "$PIPELINE" != default ]]; then
+        pipeline_args+=(--run_local_tracking true --local_seeding npv
+                        --local_nbr_seeds 15 --local_batch_size_gpu 40000)
+    fi
 fi
 
 # ── Paths ───────────────────────────────────────────────────────────────────

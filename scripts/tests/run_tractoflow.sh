@@ -16,19 +16,21 @@
 #   sbatch run_tractoflow.sh --dataset mgh1 --lib buffer
 #   sbatch run_tractoflow.sh --dataset mgh8 --lib deflate-py --level 1 --pipeline full
 #   sbatch run_tractoflow.sh --dataset Penthera_3T --pipeline full --ssd
+#   sbatch run_tractoflow.sh --dataset Penthera_3T --pipeline default
 #
 # --dataset NAME      data/NAME (required)
-# --pipeline minimal|full
-#                     minimal (default): preprocessing without denoising, topup,
-#                     eddy and tracking; full: everything but eddy
-#                     and PFT tracking
+# --pipeline minimal|full|default
+#                     minimal (the script's default): preprocessing without
+#                     denoising, topup, eddy and tracking; full: everything but
+#                     eddy and PFT tracking; default: TractoFlow's own defaults
+#                     (denoising, topup, eddy and PFT tracking on), eddy on CPU
 # --lib, --level, --debug, --zstd-targets
 #                     library options, see scripts/lib/common.sh
 # --ssd               copy the input, container and TractoFlow to the node's
 #                     /tmp and run from there
 #
 # run_tractoflow_gpu.sh takes the same options and runs on an A100 node with
-# the use_gpu profile and GPU local tracking.
+# the use_gpu profile, plus GPU local tracking for minimal and full.
 
 set -euo pipefail
 GPU=false
