@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <fnmatch.h>
 #include <time.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <zlib.h>
 #include <zstd.h>
@@ -19,7 +20,8 @@
 // library defines the real function instead
 #undef gzgetc
 
-#define MAX_HANDLES 64
+// Slots in the handle table at first; it doubles when full
+#define INITIAL_HANDLES 16
 #define DEFAULT_LEVEL 1
 // Size of each handle's buffers, so also of its write() and read() calls
 #define DEFAULT_BUFFER_SIZE (128 * 1024)
@@ -100,6 +102,7 @@ typedef struct{
     unsigned char back[UNGET_SIZE]; // gzungetc's characters, read before upos
     int nback;
     int rewinds;            // times the decoder went back to the first frame
+    int forked;             // a copy of the parent's handle in a fork() child
 
     // For the line printed at gzclose
     long long raw_bytes;    // compressed bytes written or read
@@ -107,23 +110,25 @@ typedef struct{
     double secs;            // time spent compressing or decoding, syscalls included
 } zstd_handle_t;
 
-static zstd_handle_t *handles[MAX_HANDLES];
-static int handle_count;
+// lock guards the handle table and the context pools. Each handle belongs to
+// one thread at a time, as zlib's do, so its own fields need no lock
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static zstd_handle_t **handles;
+static int handle_slots;
+static int handle_count;    // also read without the lock, atomically, to skip empty tables
 
 static ZSTD_CCtx *cctx_pool[POOL_SIZE];
 static ZSTD_DCtx *dctx_pool[POOL_SIZE];
 static int cctx_pooled, dctx_pooled;
 
+// Per-call prints only with ZSTD_DEBUG set (read once, in init)
+static int debug;
+
 
 /* Helpers */
 
-// Per-call prints only with ZSTD_DEBUG set
 static int debug_enabled(void){
-    static int enabled = -1;
-    if (enabled < 0){
-        enabled = getenv("ZSTD_DEBUG") != NULL;
-    }
-    return enabled;
+    return debug;
 }
 
 // ZSTD_LEVEL sets the level; the zlib level in the mode string is ignored
@@ -195,16 +200,20 @@ static double now(void){
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// The library's handle behind file, or NULL for one of zlib's
+// The library's handle behind file, or NULL for one of zlib's. Processes
+// with no zstd file open never take the lock
 static zstd_handle_t *get_handle(gzFile file){
-    if (handle_count == 0 || !file){
+    if (!file || __atomic_load_n(&handle_count, __ATOMIC_ACQUIRE) == 0){
         return NULL;
     }
-    for (int i = 0; i < MAX_HANDLES; i++){
-        if (handles[i] && (gzFile)handles[i] == file)
-            return handles[i];
+    zstd_handle_t *found = NULL;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < handle_slots && !found; i++){
+        if ((gzFile)handles[i] == file)
+            found = handles[i];
     }
-    return NULL;
+    pthread_mutex_unlock(&lock);
+    return found;
 }
 
 static int write_all(int fd, const void *buf, size_t len){
@@ -267,29 +276,50 @@ static int alloc_buffers(zstd_handle_t *h){
 /* Contexts */
 
 // Contexts are reset and reused across files instead of recreated, which
-// keeps their allocated tables
+// keeps their allocated tables. Creating, resetting and freeing happen
+// outside the lock
 static ZSTD_CCtx *take_cctx(void){
-    return cctx_pooled > 0 ? cctx_pool[--cctx_pooled] : ZSTD_createCCtx();
+    ZSTD_CCtx *cctx = NULL;
+    pthread_mutex_lock(&lock);
+    if (cctx_pooled > 0){
+        cctx = cctx_pool[--cctx_pooled];
+    }
+    pthread_mutex_unlock(&lock);
+    return cctx ? cctx : ZSTD_createCCtx();
 }
 
 static void put_cctx(ZSTD_CCtx *cctx){
     ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-    if (cctx_pooled < POOL_SIZE){
+    pthread_mutex_lock(&lock);
+    int kept = cctx_pooled < POOL_SIZE;
+    if (kept){
         cctx_pool[cctx_pooled++] = cctx;
-    } else{
+    }
+    pthread_mutex_unlock(&lock);
+    if (!kept){
         ZSTD_freeCCtx(cctx);
     }
 }
 
 static ZSTD_DCtx *take_dctx(void){
-    return dctx_pooled > 0 ? dctx_pool[--dctx_pooled] : ZSTD_createDCtx();
+    ZSTD_DCtx *dctx = NULL;
+    pthread_mutex_lock(&lock);
+    if (dctx_pooled > 0){
+        dctx = dctx_pool[--dctx_pooled];
+    }
+    pthread_mutex_unlock(&lock);
+    return dctx ? dctx : ZSTD_createDCtx();
 }
 
 static void put_dctx(ZSTD_DCtx *dctx){
     ZSTD_DCtx_reset(dctx, ZSTD_reset_session_and_parameters);
-    if (dctx_pooled < POOL_SIZE){
+    pthread_mutex_lock(&lock);
+    int kept = dctx_pooled < POOL_SIZE;
+    if (kept){
         dctx_pool[dctx_pooled++] = dctx;
-    } else{
+    }
+    pthread_mutex_unlock(&lock);
+    if (!kept){
         ZSTD_freeDCtx(dctx);
     }
 }
@@ -297,15 +327,8 @@ static void put_dctx(ZSTD_DCtx *dctx){
 
 /* Handles */
 
+// NULL only when out of memory: the table grows as needed
 static zstd_handle_t *add_handle(int mode, int fd, const char *path){
-    int slot = 0;
-    while (slot < MAX_HANDLES && handles[slot]){
-        slot++;
-    }
-    if (slot == MAX_HANDLES){
-        return NULL;
-    }
-
     zstd_handle_t *h = calloc(1, sizeof(zstd_handle_t));
     if (!h || !(h->path = strdup(path))){
         free(h);
@@ -315,18 +338,40 @@ static zstd_handle_t *add_handle(int mode, int fd, const char *path){
     h->fd = fd;
     h->err = Z_OK;
     h->buf_size = DEFAULT_BUFFER_SIZE;
+
+    pthread_mutex_lock(&lock);
+    int slot = 0;
+    while (slot < handle_slots && handles[slot]){
+        slot++;
+    }
+    if (slot == handle_slots){
+        int slots = handle_slots ? handle_slots * 2 : INITIAL_HANDLES;
+        zstd_handle_t **grown = realloc(handles, slots * sizeof(*handles));
+        if (!grown){
+            pthread_mutex_unlock(&lock);
+            free(h->path);
+            free(h);
+            return NULL;
+        }
+        memset(grown + handle_slots, 0, (slots - handle_slots) * sizeof(*grown));
+        handles = grown;
+        handle_slots = slots;
+    }
     handles[slot] = h;
-    handle_count++;
+    __atomic_add_fetch(&handle_count, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&lock);
     return h;
 }
 
 static void free_handle(zstd_handle_t *h){
-    for (int i = 0; i < MAX_HANDLES; i++){
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < handle_slots; i++){
         if (handles[i] == h){
             handles[i] = NULL;
-            handle_count--;
+            __atomic_sub_fetch(&handle_count, 1, __ATOMIC_RELEASE);
         }
     }
+    pthread_mutex_unlock(&lock);
     free(h->in);
     free(h->out);
     free(h->cache);
@@ -338,12 +383,7 @@ static void free_handle(zstd_handle_t *h){
 
 /* Open */
 
-static gzFile open_write(const char *path, const char *mode, original_gzopen_t original_gzopen){
-    if (handle_count == MAX_HANDLES){
-        fprintf(stderr, "zstd_lib: all %d handles in use, %s stays gzip\n", MAX_HANDLES, path);
-        return original_gzopen(path, mode);
-    }
-
+static gzFile open_write(const char *path, const char *mode){
     // Same flags as zlib: "x" for O_EXCL, "e" for O_CLOEXEC
     int flags = O_WRONLY | O_CREAT | O_TRUNC | (strchr(mode, 'x') ? O_EXCL : 0) | (strchr(mode, 'e') ? O_CLOEXEC : 0);
     int fd = open(path, flags, 0666);
@@ -382,11 +422,6 @@ static gzFile open_write(const char *path, const char *mode, original_gzopen_t o
 // Takes over fd, whose first frame starts at start. On failure the caller
 // still owns fd
 static gzFile open_read(int fd, off_t start, const char *label){
-    if (handle_count == MAX_HANDLES){
-        fprintf(stderr, "zstd_lib: can't read %s: all %d handles in use\n", label, MAX_HANDLES);
-        errno = EMFILE;
-        return NULL;
-    }
     ZSTD_DCtx *dctx = take_dctx();
     zstd_handle_t *h = dctx ? add_handle(READ_STREAM, fd, label) : NULL;
     if (!h){
@@ -430,7 +465,7 @@ static gzFile open_gz(const char *name, const char *path, const char *mode, orig
     gzFile file;
     int m = open_mode(mode);
     if (m == 'w' && is_target(path)){
-        file = open_write(path, mode, original_gzopen);
+        file = open_write(path, mode);
     } else if (m == 'r'){
         file = open_read_path(path, mode, original_gzopen);
     } else{
@@ -1196,6 +1231,9 @@ const char *gzerror(gzFile file, int *errnum) {
     if (errnum){
         *errnum = h->err;
     }
+    if (h->forked){
+        return "zstd_lib: handle opened before fork() belongs to the parent";
+    }
     if (h->err == Z_MEM_ERROR){
         return "out of memory";
     }
@@ -1203,7 +1241,8 @@ const char *gzerror(gzFile file, int *errnum) {
 }
 
 // As in zlib, a reader also forgets it reached the end of the file, so it
-// can go on reading a file that has grown (e.g. after the writer's gzflush)
+// can go on reading a file that has grown (e.g. after the writer's gzflush).
+// A handle inherited across fork() stays unusable
 void gzclearerr(gzFile file) {
     static original_gzclearerr_t original_gzclearerr = NULL;
     if (!original_gzclearerr) original_gzclearerr = dlsym(RTLD_NEXT, "gzclearerr");
@@ -1211,6 +1250,9 @@ void gzclearerr(gzFile file) {
     zstd_handle_t *h = get_handle(file);
     if (!h){
         original_gzclearerr(file);
+        return;
+    }
+    if (h->forked){
         return;
     }
     if (h->mode == READ_STREAM){
@@ -1227,10 +1269,15 @@ void gzclearerr(gzFile file) {
 /* Close */
 
 // Ends the frame and closes the file; one summary line per file, always
-// printed (scripts/lib/common.sh sums them)
+// printed (scripts/lib/common.sh sums them). A handle inherited across fork()
+// is only dropped: its descriptor copy is closed, nothing is written
 static int close_handle(zstd_handle_t *h){
     int ret = h->err;
-    if (h->mode == WRITE_STREAM){
+    if (h->forked){
+        ret = Z_OK;
+        if (h->mode == WRITE_STREAM) put_cctx(h->cctx);
+        else put_dctx(h->dctx);
+    } else if (h->mode == WRITE_STREAM){
         if (ret == Z_OK && compress_data(h, NULL, 0, ZSTD_e_end) < 0){
             ret = h->err;
         }
@@ -1281,4 +1328,37 @@ int gzclose_w(gzFile file) {
         return original_gzclose_w(file);
     }
     return h->mode == WRITE_STREAM ? close_handle(h) : Z_STREAM_ERROR;
+}
+
+
+/* Fork */
+
+// The prepare handler holds the lock across fork(), so the child's copy of
+// the table is consistent and its lock isn't held by a thread it doesn't have
+static void fork_prepare(void){
+    pthread_mutex_lock(&lock);
+}
+
+static void fork_parent(void){
+    pthread_mutex_unlock(&lock);
+}
+
+// The child's handles are copies of the parent's and share its open files:
+// writing through one would add data, or a frame end at gzclose, to the
+// parent's stream, and reading would move the parent's file offset. So
+// they are only marked: every call on them fails, and gzclose drops them
+// without any I/O. Nothing else is allocated or printed here
+static void fork_child(void){
+    for (int i = 0; i < handle_slots; i++){
+        if (handles[i]){
+            handles[i]->forked = 1;
+            handles[i]->err = Z_STREAM_ERROR;
+        }
+    }
+    pthread_mutex_unlock(&lock);
+}
+
+__attribute__((constructor)) static void init(void){
+    debug = getenv("ZSTD_DEBUG") != NULL;
+    pthread_atfork(fork_prepare, fork_parent, fork_child);
 }

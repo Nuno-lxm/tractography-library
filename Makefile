@@ -37,11 +37,11 @@ ZSTD_LIBS = -lzstd
 
 # Same zstd overrides as bench_compression when built in the container
 zstd_lib.so: $(SRC_DIR)/zstd_lib.c | bin
-	gcc -shared -fPIC -Wall -O2 $(ZSTD_CFLAGS) -o $(BIN_DIR)/zstd_lib.so $(SRC_DIR)/zstd_lib.c -ldl $(ZSTD_LIBS)
+	gcc -shared -fPIC -Wall -O2 -pthread $(ZSTD_CFLAGS) -o $(BIN_DIR)/zstd_lib.so $(SRC_DIR)/zstd_lib.c -ldl $(ZSTD_LIBS)
 
 # Run with LD_PRELOAD=$$PWD/bin/zstd_lib.so ./bin/test_zstd_stream
 test_zstd_stream: tests/test_zstd_stream.c | bin
-	gcc -Wall -O2 -o $(BIN_DIR)/test_zstd_stream tests/test_zstd_stream.c -lz
+	gcc -Wall -O2 -pthread -o $(BIN_DIR)/test_zstd_stream tests/test_zstd_stream.c -lz
 
 bench_compression: tests/bench_compression.c | bin
 	gcc -Wall -O2 $(ZSTD_CFLAGS) -o $(BIN_DIR)/bench_compression tests/bench_compression.c -lz -ldeflate $(ZSTD_LIBS)

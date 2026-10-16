@@ -20,7 +20,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <pthread.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <zlib.h>
 
 #define DIR "test/zstd_stream"
@@ -723,17 +725,16 @@ static void test_api(void){
     free(back);
 }
 
-// The handle table is still fixed at 64 (growable in Phase 4): writes past
-// it fall back to gzip, and every file still reads back intact
+// The handle table grows: every file is zstd, all open at once
 static void test_many_handles(void){
-    enum { FILES = 80, SIZE = 50000 };
+    enum { FILES = 200, SIZE = 50000 };
     gzFile g[FILES];
     char name[64];
     unsigned char *data = make_data(SIZE * FILES);
     unsigned char back[SIZE + 1];
 
     for (int i = 0; i < FILES; i++){
-        snprintf(name, sizeof(name), "z_many_%02d.gz", i);
+        snprintf(name, sizeof(name), "z_many_%03d.gz", i);
         g[i] = gzopen(path(name), "wb");
     }
     int ok = 1;
@@ -748,12 +749,12 @@ static void test_many_handles(void){
 
     int zstd = 0;
     for (int i = 0; i < FILES; i++){
-        snprintf(name, sizeof(name), "z_many_%02d.gz", i);
+        snprintf(name, sizeof(name), "z_many_%03d.gz", i);
         zstd += magic(path(name)) == 'z';
         g[i] = gzopen(path(name), "rb");
     }
     printf("    %d of %d files zstd\n", zstd, FILES);
-    CHECK(zstd == 64);
+    CHECK(zstd == FILES);
     ok = 1;
     for (int i = 0; i < FILES; i++){
         ok &= g[i] && gzread(g[i], back, sizeof(back)) == SIZE && memcmp(back, data + i * SIZE, SIZE) == 0;
@@ -761,6 +762,111 @@ static void test_many_handles(void){
     }
     CHECK(ok);
     free(data);
+}
+
+static void test_fork(void){
+    size_t n = 2 * MB;
+    unsigned char *data = make_data(n);
+    unsigned char *back = malloc(n + 1);
+    const char *src = path("z_fork_src.gz");
+    const char *w = path("z_fork_w.gz");
+    const char *mine = path("z_fork_child.gz");
+    CHECK(write_gz(src, "wb", data, n, n) == 0);
+
+    // Open across the fork: a writer with data still inside zstd, and a
+    // reader part way through its file
+    gzFile g = gzopen(w, "wb");
+    CHECK(gzwrite(g, data, n / 2) == (int)(n / 2));
+    gzFile r = gzopen(src, "rb");
+    CHECK(gzread(r, back, 300000) == 300000);
+
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0){
+        // Every call on the parent's handles fails and gzclose drops them
+        // without I/O; the child's own new handles work
+        int bad = 0, err;
+        bad += gzwrite(g, data, 100) != 0;
+        bad += gzputs(g, "x") != -1;
+        bad += gzflush(g, Z_FINISH) != Z_STREAM_ERROR;
+        bad += gzread(r, back, 100) != -1;
+        bad += gzgetc(r) != -1;
+        bad += gzseek(r, 0, SEEK_SET) != -1;
+        bad += strstr(gzerror(g, &err), "fork") == NULL || err != Z_STREAM_ERROR;
+        gzclearerr(g);
+        bad += gzwrite(g, data, 100) != 0;
+        bad += gzclose(g) != Z_OK;
+        bad += gzclose(r) != Z_OK;
+        bad += write_gz(mine, "wb", data, 100000, 7777) != 0;
+        bad += read_gz(mine, back, n, n) != 100000 || memcmp(back, data, 100000) != 0;
+        // exit, not _exit, so the child's destructors run too
+        exit(bad);
+    }
+
+    int status = 0;
+    CHECK(pid > 0 && waitpid(pid, &status, 0) == pid);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0){
+        printf("    %d checks failed in the child\n", WEXITSTATUS(status));
+    }
+    CHECK(magic(mine) == 'z');
+
+    // The parent's streams go on as if the child weren't there
+    CHECK(gzread(r, back + 300000, n) == (int)(n - 300000) && memcmp(back, data, n) == 0);
+    CHECK(gzclose(r) == Z_OK);
+    CHECK(gzwrite(g, data + n / 2, n - n / 2) == (int)(n - n / 2));
+    CHECK(gzclose(g) == Z_OK);
+    CHECK(read_gz(w, back, n + 1, n + 1) == (long long)n && memcmp(back, data, n) == 0);
+    CHECK(cli_matches(w, data, n));
+    free(data);
+    free(back);
+}
+
+enum { THREADS = 8, THREAD_FILES = 12, THREAD_DATA = 512 * 1024 };
+static unsigned char *thread_data;
+
+// Each thread keeps one handle open while it writes, reads and closes
+// others, so the table grows, shrinks and is searched from every thread at
+// once. Returns the number of failed checks
+static void *thread_work(void *arg){
+    long t = (long)arg, bad = 0;
+    char keep[256], name[256];
+    unsigned char *back = malloc(THREAD_DATA + 1);
+    snprintf(keep, sizeof(keep), "%s/z_thread_%ld_keep.gz", DIR, t);
+    gzFile k = gzopen(keep, "wb");
+    bad += k == NULL;
+    for (int i = 0; i < THREAD_FILES; i++){
+        size_t n = THREAD_DATA - t * 1000 - i * 77;
+        snprintf(name, sizeof(name), "%s/z_thread_%ld_%d.gz", DIR, t, i);
+        bad += write_gz(name, "wb", thread_data + t, n, 4096 + 13 * t) != 0;
+        bad += magic(name) != 'z';
+        bad += read_gz(name, back, THREAD_DATA + 1, 65536) != (long long)n || memcmp(back, thread_data + t, n) != 0;
+        bad += gzwrite(k, thread_data + i, 1000) != 1000;
+    }
+    bad += gzclose(k) != Z_OK;
+    bad += read_gz(keep, back, THREAD_DATA + 1, THREAD_DATA + 1) != THREAD_FILES * 1000;
+    for (int i = 0; i < THREAD_FILES; i++){
+        bad += memcmp(back + i * 1000, thread_data + i, 1000) != 0;
+    }
+    free(back);
+    return (void *)bad;
+}
+
+static void test_threads(void){
+    thread_data = make_data(THREAD_DATA);
+    pthread_t threads[THREADS];
+    for (long t = 0; t < THREADS; t++){
+        CHECK(pthread_create(&threads[t], NULL, thread_work, (void *)t) == 0);
+    }
+    long bad = 0;
+    for (int t = 0; t < THREADS; t++){
+        void *ret;
+        pthread_join(threads[t], &ret);
+        bad += (long)ret;
+    }
+    if (bad) printf("    %ld checks failed in the threads\n", bad);
+    CHECK(bad == 0);
+    free(thread_data);
 }
 
 
@@ -811,7 +917,8 @@ int main(void){
     run("gzip, plain and gzdopen files", test_gzip_and_raw);
     run("gzbuffer, gzoffset, gzfread/gzfwrite, misuse, levels", test_api);
     run("more than 64 open handles", test_many_handles);
-    printf("fork with open handles\n  skipped (Phase 4)\n");
+    run("fork with open handles", test_fork);
+    run("threads opening, reading and closing at once", test_threads);
 
     printf("\n%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
