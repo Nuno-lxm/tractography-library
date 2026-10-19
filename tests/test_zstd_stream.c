@@ -822,6 +822,59 @@ static void test_fork(void){
     free(back);
 }
 
+// A child that exits with a writer open: exit() reports it once, _exit()
+// can't, and either way the file fails to read. The parent's handle,
+// inherited by the child, isn't reported
+static void test_exit(void){
+    size_t n = 300 * 1024;
+    unsigned char *data = make_data(n);
+    unsigned char *back = malloc(n);
+    const char *parent = path("z_exit_parent.gz");
+    gzFile g = gzopen(parent, "wb");
+    CHECK(gzwrite(g, data, 1000) == 1000);
+
+    for (int quick = 0; quick <= 1; quick++){
+        const char *mine = path(quick ? "z_exit_quick.gz" : "z_exit_open.gz");
+        off_t before = lseek(STDERR_FILENO, 0, SEEK_END);
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == 0){
+            // More than one buffer, so part of the frame is in the file
+            gzFile c = gzopen(mine, "wb");
+            int bad = c == NULL || gzwrite(c, data, n) != (int)n;
+            if (quick) _exit(bad);
+            exit(bad);
+        }
+        int status = 0;
+        CHECK(pid > 0 && waitpid(pid, &status, 0) == pid);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+        char log[4096] = {0};
+        int fd = open(LOG, O_RDONLY);
+        ssize_t got = fd >= 0 ? pread(fd, log, sizeof(log) - 1, before) : -1;
+        if (fd >= 0) close(fd);
+        int lines = 0;
+        for (const char *p = log; (p = strstr(p, "still open at exit")); p++){
+            lines++;
+        }
+        char want[300];
+        snprintf(want, sizeof(want), "zstd_lib: can't write %s: still open at exit, %zu -> ", mine, n);
+        CHECK(lines == (quick ? 0 : 1));
+        CHECK(quick || (got > 0 && strstr(log, want) != NULL));
+        CHECK(strstr(log, "z_exit_parent") == NULL);
+
+        int err;
+        char msg[128] = "";
+        CHECK(magic(mine) == 'z');
+        CHECK(read_to_end(mine, back, &err, msg) == -1 && err == Z_DATA_ERROR);
+    }
+
+    CHECK(gzclose(g) == Z_OK);
+    CHECK(read_gz(parent, back, n, n) == 1000 && memcmp(back, data, 1000) == 0);
+    free(data);
+    free(back);
+}
+
 enum { THREADS = 8, THREAD_FILES = 12, THREAD_DATA = 512 * 1024 };
 static unsigned char *thread_data;
 
@@ -918,6 +971,7 @@ int main(void){
     run("gzbuffer, gzoffset, gzfread/gzfwrite, misuse, levels", test_api);
     run("more than 64 open handles", test_many_handles);
     run("fork with open handles", test_fork);
+    run("writer still open at exit", test_exit);
     run("threads opening, reading and closing at once", test_threads);
 
     printf("\n%d checks, %d failed\n", checks, failures);

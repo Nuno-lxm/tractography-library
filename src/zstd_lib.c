@@ -1331,6 +1331,38 @@ int gzclose_w(gzFile file) {
 }
 
 
+/* Exit */
+
+// glibc's, from the C++ ABI; zlib.h and stdlib.h don't declare it
+extern int __cxa_atexit(void (*func)(void *), void *arg, void *dso);
+
+// A write handle still open at exit() never gets its frame end, and what
+// zstd and out still hold is lost, as zlib loses its buffer. This only
+// reports it, once per file; readers then fail with Z_DATA_ERROR. exec()
+// and _exit() run no exit handlers: there only the reader's error shows.
+// Not a destructor: a preloaded library is finalized right after the
+// program, before the libraries whose destructors (C++ statics included)
+// may still gzclose their files. init registers it for the whole process
+// before ld.so registers its finalizer, so it runs after every destructor
+static void report_open(void *unused){
+    (void)unused;
+    if (__atomic_load_n(&handle_count, __ATOMIC_ACQUIRE) == 0){
+        return;
+    }
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < handle_slots; i++){
+        zstd_handle_t *h = handles[i];
+        // A handle with an error already printed it; a fork() child's copies
+        // belong to the parent
+        if (h && h->mode == WRITE_STREAM && !h->forked && h->err == Z_OK){
+            fprintf(stderr, "zstd_lib: can't write %s: still open at exit, %lld -> %lld bytes, frame not ended\n",
+                h->path, h->data_bytes, h->raw_bytes);
+        }
+    }
+    pthread_mutex_unlock(&lock);
+}
+
+
 /* Fork */
 
 // The prepare handler holds the lock across fork(), so the child's copy of
@@ -1361,4 +1393,7 @@ static void fork_child(void){
 __attribute__((constructor)) static void init(void){
     debug = getenv("ZSTD_DEBUG") != NULL;
     pthread_atfork(fork_prepare, fork_parent, fork_child);
+    // NULL, not this library's handle, or the handler would run when this
+    // library is finalized. Safe since a preloaded library is never unloaded
+    __cxa_atexit(report_open, NULL, NULL);
 }
