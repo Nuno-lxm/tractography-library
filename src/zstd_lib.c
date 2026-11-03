@@ -23,6 +23,8 @@
 // Slots in the handle table at first; it doubles when full
 #define INITIAL_HANDLES 16
 #define DEFAULT_LEVEL 1
+// zlib level for gz writes to FINAL_FILE_TARGETS files (zlib's own default)
+#define DEFAULT_FINAL_LEVEL 6
 // Size of each handle's buffers, so also of its write() and read() calls
 #define DEFAULT_BUFFER_SIZE (128 * 1024)
 // Decompressed bytes kept from the start of each file read (compression_lib's
@@ -151,12 +153,11 @@ static long long env_number(const char *name, long long def){
     return *end || value < 0 ? def : value;
 }
 
-// Only gz writes to files matching a ZSTD_FILE_TARGETS glob become zstd (unset:
-// none), so the intermediates can be converted while the final outputs stay
-// gzip. Like BUFFER_FILE_TARGETS, a pattern with a / matches the full path,
-// otherwise the basename
-static int is_target(const char *path){
-    const char *env = getenv("ZSTD_FILE_TARGETS");
+// Whether path matches one of the globs in the environment variable var
+// (unset: none). Like BUFFER_FILE_TARGETS, a pattern with a / matches the full
+// path, otherwise the basename
+static int matches_globs(const char *var, const char *path){
+    const char *env = getenv(var);
     if (!env || !*env){
         return 0;
     }
@@ -175,6 +176,42 @@ static int is_target(const char *path){
     }
     free(list);
     return match;
+}
+
+// Only gz writes to files matching a ZSTD_FILE_TARGETS glob become zstd, so
+// the intermediates can be converted while the final outputs stay gzip
+static int is_target(const char *path){
+    return matches_globs("ZSTD_FILE_TARGETS", path);
+}
+
+// gz writes to FINAL_FILE_TARGETS files that aren't zstd targets get zlib
+// level FINAL_LEVEL (0-9, default 6), whatever the caller asked for. Under a
+// fast default level (zlib-ng built with level 1) the final outputs then stay
+// as small as zlib's. -1 when path isn't a final output
+static int final_level(const char *path){
+    if (!matches_globs("FINAL_FILE_TARGETS", path)){
+        return -1;
+    }
+    long long level = env_number("FINAL_LEVEL", DEFAULT_FINAL_LEVEL);
+    return level > 9 ? DEFAULT_FINAL_LEVEL : (int)level;
+}
+
+// mode without its level digits, followed by level. zlib reads every digit
+// in the mode as the level, so the old one has to go. 0 if it doesn't fit
+static int set_mode_level(char *dst, size_t cap, const char *mode, int level){
+    size_t n = 0;
+    for (const char *p = mode; *p; p++){
+        if (*p >= '0' && *p <= '9'){
+            continue;
+        }
+        if (n + 2 >= cap){
+            return 0;
+        }
+        dst[n++] = *p;
+    }
+    dst[n++] = (char)('0' + level);
+    dst[n] = '\0';
+    return 1;
 }
 
 // gzopen's mode as zlib reads it: the last of r, w and a wins. 0 for what
@@ -460,14 +497,23 @@ static gzFile open_read_path(const char *path, const char *mode, original_gzopen
     return file;
 }
 
-// Shared by gzopen and gzopen64; appends and non-target writes stay with zlib
+// Shared by gzopen and gzopen64; appends and non-target writes stay with zlib,
+// final outputs with their level raised
 static gzFile open_gz(const char *name, const char *path, const char *mode, original_gzopen_t original_gzopen){
     gzFile file;
     int m = open_mode(mode);
+    int level;
+    char final_mode[32];
     if (m == 'w' && is_target(path)){
         file = open_write(path, mode);
     } else if (m == 'r'){
         file = open_read_path(path, mode, original_gzopen);
+    } else if (m == 'w' && (level = final_level(path)) >= 0 &&
+            set_mode_level(final_mode, sizeof(final_mode), mode, level)){
+        file = original_gzopen(path, final_mode);
+        if (file){
+            fprintf(stderr, "zstd_lib: final level %d, %s\n", level, path);
+        }
     } else{
         file = original_gzopen(path, mode);
     }

@@ -905,6 +905,73 @@ static void *thread_work(void *arg){
     return (void *)bad;
 }
 
+// The gzip header's XFL byte, which zlib and zlib-ng set from the level: 4 for
+// level 1, 2 for level 9, 0 otherwise. -1 if it can't be read
+static int gzip_xfl(const char *file){
+    unsigned char h[10];
+    int fd = open(file, O_RDONLY);
+    ssize_t got = fd >= 0 ? read(fd, h, sizeof(h)) : -1;
+    if (fd >= 0) close(fd);
+    return got == (ssize_t)sizeof(h) && h[0] == 0x1f && h[1] == 0x8b ? h[8] : -1;
+}
+
+static void test_final_level(void){
+    size_t n = 200 * 1024;
+    unsigned char *data = make_data(n);
+    unsigned char *back = malloc(n + 1001);
+    off_t before = lseek(STDERR_FILENO, 0, SEEK_END);
+    setenv("FINAL_FILE_TARGETS", "f_*,z_final*", 1);
+
+    // FINAL_LEVEL, then the mode, then the gzip XFL byte that level gives
+    static const struct { const char *name, *level, *mode; int xfl; } cases[] = {
+        {"f_default.gz", NULL, "wb1", 0},   // default level 6
+        {"f_nine.gz", "9", "wb", 2},
+        {"f_one.gz", "1", "wb9", 4},        // lowers a level too
+        {"f_invalid.gz", "12", "wb1", 0},   // out of range: 6
+        {"g_other.gz", "9", "wb1", 4},      // not a final output
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++){
+        const char *f = path(cases[i].name);
+        if (cases[i].level) setenv("FINAL_LEVEL", cases[i].level, 1);
+        else unsetenv("FINAL_LEVEL");
+        CHECK(write_gz(f, cases[i].mode, data, n, 50000) == 0);
+        CHECK(gzip_xfl(f) == cases[i].xfl);
+        CHECK(read_gz(f, back, n + 1, n + 1) == (long long)n && memcmp(back, data, n) == 0);
+    }
+    unsetenv("FINAL_LEVEL");
+
+    // A zstd target stays zstd; appends and transparent writes are untouched
+    const char *z = path("z_final.gz");
+    CHECK(write_gz(z, "wb", data, n, n) == 0);
+    CHECK(magic(z) == 'z');
+    const char *f = path("f_default.gz");
+    CHECK(write_gz(f, "ab1", data, 1000, 1000) == 0);
+    CHECK(read_gz(f, back, n + 1001, n + 1001) == (long long)n + 1000);
+    const char *t = path("f_plain");
+    CHECK(write_gz(t, "wT", data, 1000, 1000) == 0 && file_size(t) == 1000);
+
+    // One line per final file, none for the rest
+    char log[4096] = {0};
+    int fd = open(LOG, O_RDONLY);
+    if (fd >= 0){
+        CHECK(pread(fd, log, sizeof(log) - 1, before) > 0);
+        close(fd);
+    }
+    int lines = 0;
+    for (const char *p = log; (p = strstr(p, "zstd_lib: final level")); p++){
+        lines++;
+    }
+    char want[300];
+    snprintf(want, sizeof(want), "zstd_lib: final level 9, %s\n", path("f_nine.gz"));
+    CHECK(lines == 4);
+    CHECK(strstr(log, want) != NULL);
+    CHECK(strstr(log, "g_other") == NULL && strstr(log, "f_plain") == NULL);
+
+    unsetenv("FINAL_FILE_TARGETS");
+    free(data);
+    free(back);
+}
+
 static void test_threads(void){
     thread_data = make_data(THREAD_DATA);
     pthread_t threads[THREADS];
@@ -940,6 +1007,8 @@ int main(void){
     unsetenv("ZSTD_LEVEL");
     unsetenv("ZSTD_WINDOW_LOG");
     unsetenv("ZSTD_HEADER_CACHE");
+    unsetenv("FINAL_FILE_TARGETS");
+    unsetenv("FINAL_LEVEL");
 
     // The library's lines go to the log
     int log = open(LOG, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
@@ -972,6 +1041,7 @@ int main(void){
     run("more than 64 open handles", test_many_handles);
     run("fork with open handles", test_fork);
     run("writer still open at exit", test_exit);
+    run("final outputs at FINAL_LEVEL", test_final_level);
     run("threads opening, reading and closing at once", test_threads);
 
     printf("\n%d checks, %d failed\n", checks, failures);
