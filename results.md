@@ -1,7 +1,8 @@
 | mgh1 resample | resample_dwi | fslmaths | mrcalc | step | vs gz | final output | intermediate | peak memory |
 |---|---|---|---|---|---|---|---|---|
 | gz (system zlib) | 258 s | 192 s | 204 s | 655 s | 1.00× | 2.71 GB | 2.86 GB | 13.6 GB |
-| zstd | 260 s | 78 s | 192 s | 530 s | 1.24× | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
+| zstd (one-shot) | 260 s | 78 s | 192 s | 530 s | 1.24× | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
+| zstd (streaming) | 259 s | 71 s | 185 s | 516 s | 1.27× | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
 | zlib-ng (level 6) | 166 s | 138 s | 133 s | 438 s | 1.50× | 2.71 GB | 2.85 GB | 13.6 GB |
 | deflate-py | 172 s | 111 s | 114 s | 398 s | 1.65× | 2.72 GB | 2.86 GB | 20.1 GB |
 | deflate-py level 1 | 172 s | 91 s | 95 s | 359 s | 1.82× | 2.71 GB | 2.85 GB | 20.1 GB |
@@ -9,6 +10,8 @@
 | zstd + deflate-py level 1 | 171 s | 76 s | 83 s | 331 s | 1.98× | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
 | zlib-ng level 1 | 166 s | 83 s | 78 s | 328 s | 2.00× | 3.20 GB | 3.34 GB | 13.6 GB |
 | nii | 136 s | 43 s | 40 s | 220 s | 2.98× | 6.25 GB | 6.25 GB | 12.3–13.6 GB |
+
+zstd (streaming): job 2181343 on cnx176, Nov 3, 2026, `zstd_lib.so` from `0be4b80`, target `dwi_resample_clipped.nii.gz` at zstd level 1. It compressed 6.249 GB to 2.848 GB in 15.4 s (the gz intermediate is 2.855 GB), and mrcalc read it back in 5.7 s with 0 rewinds, after a 128 KB header read on a separate handle. A gz run on the same day (2181342, cnx176) took 657 s with the same per-command times as the gz row and the same 13.6 GB peak, and its final output is the same size to the byte (2,713,540,498). Read and write calls: 382k and 354k, against 709k and 680k for gz.
 
 | mgh1 minimal pipeline | runs | wall | vs none | DTI_Metrics end | FODF_Metrics end | DWI behind T1 | task time | CPU-h | final outputs | work-dir images |
 |---|---|---|---|---|---|---|---|---|---|---|
