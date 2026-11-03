@@ -123,4 +123,10 @@ NXF_VER=21.04.0 nextflow run "$tractoflow_dir/main.nf" \
 elapsed=$(( $(date +%s) - start_ts ))
 echo "Total wall time: ${elapsed}s ($((elapsed / 60))m $((elapsed % 60))s)"
 
+# build_io_map.py's other inputs; with --ssd the work dir is gone at exit
+if [[ "$LIB" == logger && "$SSD" == false ]]; then
+    "$lib_dir/scripts/save_io_map_inputs.sh" "$output_dir" "$work_dir" "$results_dir" ||
+        echo "Warning: save_io_map_inputs.sh failed" >&2
+fi
+
 print_summary
