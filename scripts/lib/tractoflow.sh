@@ -14,6 +14,7 @@ while [[ $# -gt 0 ]]; do
         --level)    LEVEL="$2"; shift 2 ;;
         --debug)    DEBUG=true; shift ;;
         --zstd-targets) ZSTD_TARGETS="$2"; shift 2 ;;
+        --final-targets) FINAL_TARGETS="$2"; shift 2 ;;
         --ssd)      SSD=true; shift ;;
         --help|-h)  sed -n '/^#[S!]/d; /^#/,/^$/{ s/^# \?//; p }' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -21,7 +22,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DATASET" ]]; then
-    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full|default] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--ssd]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full|default] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--final-targets GLOBS] [--ssd]" >&2
     exit 1
 fi
 check_lib_options

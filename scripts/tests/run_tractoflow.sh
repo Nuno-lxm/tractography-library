@@ -24,7 +24,7 @@
 #                     denoising, topup, eddy and tracking; full: everything but
 #                     eddy and PFT tracking; default: TractoFlow's own defaults
 #                     (denoising, topup, eddy and PFT tracking on), eddy on CPU
-# --lib, --level, --debug, --zstd-targets
+# --lib, --level, --debug, --zstd-targets, --final-targets
 #                     library options, see scripts/lib/common.sh
 # --ssd               copy the input, container and TractoFlow to the node's
 #                     /tmp and run from there

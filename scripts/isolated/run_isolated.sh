@@ -24,7 +24,7 @@
 #                       extract_b0  data/extract_b0/     (dwi, bval, bvec)
 #                       resample    data/resample_dwi/   (dwi, mask), or
 #                                   data/resample_dwi_nii/ with --nii
-# --lib, --level, --debug, --zstd-targets
+# --lib, --level, --debug, --zstd-targets, --final-targets
 #                     library options, see scripts/lib/common.sh. With the
 #                     zstd modes and --step resample, --zstd-targets defaults to the
 #                     fslmaths output that mrcalc reads back
@@ -52,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --level)      LEVEL="$2"; shift 2 ;;
         --debug)      DEBUG=true; shift ;;
         --zstd-targets) ZSTD_TARGETS="$2"; shift 2 ;;
+        --final-targets) FINAL_TARGETS="$2"; shift 2 ;;
         --nii)        NII=true; shift ;;
         --publish)    PUBLISH=true; shift ;;
         --test-dir)   TEST_DIR="$2"; shift 2 ;;
@@ -62,7 +63,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$STEP" || -z "$DATASET" ]]; then
-    echo "Usage: sbatch $0 --step normalize|extract_b0|resample --dataset NAME [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--nii] [--publish]" >&2
+    echo "Usage: sbatch $0 --step normalize|extract_b0|resample --dataset NAME [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--final-targets GLOBS] [--nii] [--publish]" >&2
     exit 1
 fi
 # Intermediate written by fslmaths (gzopen) and only read by mrcalc (gzopen);

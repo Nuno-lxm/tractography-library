@@ -2,7 +2,7 @@
 # runs a copy of the script from its spool dir, not from the repo.
 #
 # Library options (parsed by each script, checked by check_lib_options):
-#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|logger
+#   --lib none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|zstd-zlib-ng|logger
 #       none        no library (baseline)
 #       buffer      buffer_lib, read prefetching and write buffering
 #       prefetch    buffer_lib, read prefetching only
@@ -16,16 +16,24 @@
 #                   MRtrix): Python and ANTs can't read them
 #       zstd-deflate-py zstd for the --zstd-targets files, deflate-py for every
 #                   other gz write and Python's streams
+#       zstd-zlib-ng zstd for the --zstd-targets files, zlib-ng (default level 1)
+#                   for everything else, Python included; all streaming
 #       logger      logger.so, logs every IO call to /mnt/logger.log
 #   --level N   deflate*, zstd-deflate-py: compress every image at libdeflate
 #               level N (0-12); the zstd targets stay at zstd_lib's default
 #               zstd: zstd level N (1-19, default 1)
 #               zlib-ng: default level N (1-9), from the build at
 #               bin/zlib-ng-lN (scripts/isolated/build_zlib_ng.sh N)
+#               zstd-zlib-ng: the same zlib-ng build (default 1)
 #   --debug     deflate*, zstd*: log every wrapped call
 #   --zstd-targets GLOBS
 #               zstd*: files to write as zstd, as ZSTD_FILE_TARGETS (globs
 #               separated by commas; a pattern with a / matches the full path)
+#   --final-targets GLOBS
+#               zstd, zstd-zlib-ng: gz writes (FSL, MRtrix) to these files get
+#               zlib level 6, as FINAL_FILE_TARGETS; make them with
+#               scripts/zstd_targets.py --final. Python's and ANTs' writes
+#               keep their own level
 
 project_dir="/projects/I20240002/nunolxm"
 lib_dir="$project_dir/tractography-library"
@@ -36,12 +44,15 @@ LIB="none"
 LEVEL=""
 DEBUG=false
 ZSTD_TARGETS=""
+FINAL_TARGETS=""
 
 check_lib_options() {
     case "$LIB" in
-        none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|logger) ;;
-        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zlib-ng, zstd, zstd-deflate-py or logger (got: $LIB)" >&2; exit 1 ;;
+        none|buffer|prefetch|deflate|deflate-py|deflate-all|zlib-ng|zstd|zstd-deflate-py|zstd-zlib-ng|logger) ;;
+        *) echo "Error: --lib must be none, buffer, prefetch, deflate, deflate-py, deflate-all, zlib-ng, zstd, zstd-deflate-py, zstd-zlib-ng or logger (got: $LIB)" >&2; exit 1 ;;
     esac
+    # Set here, so the run's name says which build it used
+    [[ "$LIB" == zstd-zlib-ng && -z "$LEVEL" ]] && LEVEL=1
     if [[ "$LIB" != deflate* && "$LIB" != zstd* && "$DEBUG" == true ]]; then
         echo "Error: --debug only works with the deflate and zstd modes" >&2
         exit 1
@@ -58,7 +69,7 @@ check_lib_options() {
         echo "Error: --level must be 1-19 for zstd (got: $LEVEL)" >&2
         exit 1
     fi
-    if [[ "$LIB" == zlib-ng && -n "$LEVEL" ]] && ! [[ "$LEVEL" =~ ^[1-9]$ ]]; then
+    if [[ "$LIB" == zlib-ng || "$LIB" == zstd-zlib-ng ]] && [[ -n "$LEVEL" ]] && ! [[ "$LEVEL" =~ ^[1-9]$ ]]; then
         echo "Error: --level must be 1-9 for zlib-ng (got: $LEVEL)" >&2
         exit 1
     fi
@@ -68,6 +79,10 @@ check_lib_options() {
     fi
     if [[ "$LIB" != zstd* && -n "$ZSTD_TARGETS" ]]; then
         echo "Error: --zstd-targets only works with the zstd modes" >&2
+        exit 1
+    fi
+    if [[ "$LIB" != zstd && "$LIB" != zstd-zlib-ng && -n "$FINAL_TARGETS" ]]; then
+        echo "Error: --final-targets only works with --lib zstd and zstd-zlib-ng" >&2
         exit 1
     fi
 }
@@ -98,9 +113,13 @@ add_lib_configs() {
         # zstd_lib first: it hands every gz call it doesn't take to compression_lib.
         # Colon, not space: Nextflow re-exports the env unquoted in the container
         zstd-deflate-py) env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so:/mnt/bin/compression_lib.so'") ;;
+        # zlib-ng's libz.so.1 also stands in for the system zlib (MRtrix,
+        # Python) and FSL's bundled one, so zstd_lib's RTLD_NEXT reaches it
+        zstd-zlib-ng) env+=("LD_PRELOAD = '/mnt/bin/zstd_lib.so:/mnt/bin/zlib-ng-l$LEVEL/libz.so.1'") ;;
         logger)     env+=("LD_PRELOAD = '/mnt/bin/logger.so'") ;;
     esac
     [[ "$LIB" == zstd* ]] && env+=("ZSTD_FILE_TARGETS = '$ZSTD_TARGETS'")
+    [[ -n "$FINAL_TARGETS" ]] && env+=("FINAL_FILE_TARGETS = '$FINAL_TARGETS'")
     [[ "$LIB" == deflate-py || "$LIB" == deflate-all || "$LIB" == zstd-deflate-py ]] && env+=("COMPRESSION_STREAMS = 1")
     [[ "$LIB" == deflate-all ]] && env+=("COMPRESSION_READS = 1")
     if [[ "$DEBUG" == true ]]; then
@@ -151,6 +170,7 @@ print_lib_version() {
         zlib-ng)         sos=("$lib_dir/bin/zlib-ng${LEVEL:+-l$LEVEL}/libz.so.1") ;;
         zstd)            sos=("$lib_dir/bin/zstd_lib.so") ;;
         zstd-deflate-py) sos=("$lib_dir/bin/zstd_lib.so" "$lib_dir/bin/compression_lib.so") ;;
+        zstd-zlib-ng)    sos=("$lib_dir/bin/zstd_lib.so" "$lib_dir/bin/zlib-ng-l$LEVEL/libz.so.1") ;;
         logger)          sos=("$lib_dir/bin/logger.so") ;;
         *)               return ;;
     esac
@@ -201,6 +221,9 @@ print_summary() {
             END { for (p in files) printf "  %-38s %5d  %8.3f -> %8.3f  %8.2f\n", p, files[p], bin[p] / 1e9, bout[p] / 1e9, secs[p] }'
         # Failed zstd reads/writes; the task itself fails too
         find "$work_dir" -name .command.err -exec grep -H "^zstd_lib: can't\|^zstd_lib: compress failed" {} + || true
+        if [[ -n "$FINAL_TARGETS" ]]; then
+            echo "gz writes raised to the final level: $(find "$work_dir" -name .command.err -exec grep -h '^zstd_lib: final level' {} + | wc -l)"
+        fi
         echo "Files written as zstd in work dir:"
         find "$work_dir" -type f -name '*.gz' -exec sh -c \
             'head -c 4 "$1" | od -An -tx1 | grep -q "28 b5 2f fd" && printf "  %s\n" "$1"' _ {} \; || true
