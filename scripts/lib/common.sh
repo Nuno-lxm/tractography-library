@@ -23,7 +23,9 @@
 #               level N (0-12); the zstd targets stay at zstd_lib's default
 #               zstd: zstd level N (1-19, default 1)
 #               zlib-ng: default level N (1-9), from the build at
-#               bin/zlib-ng-lN (scripts/isolated/build_zlib_ng.sh N)
+#               bin/zlib-ng-lN (scripts/isolated/build_zlib_ng.sh N). N+
+#               (e.g. 2+) also raises the lower levels callers ask for to N,
+#               so nibabel's level 1 becomes N (build_zlib_ng.sh N+)
 #               zstd-zlib-ng: the same zlib-ng build (default 1)
 #   --debug     deflate*, zstd*: log every wrapped call
 #   --zstd-targets GLOBS
@@ -69,8 +71,8 @@ check_lib_options() {
         echo "Error: --level must be 1-19 for zstd (got: $LEVEL)" >&2
         exit 1
     fi
-    if [[ "$LIB" == zlib-ng || "$LIB" == zstd-zlib-ng ]] && [[ -n "$LEVEL" ]] && ! [[ "$LEVEL" =~ ^[1-9]$ ]]; then
-        echo "Error: --level must be 1-9 for zlib-ng (got: $LEVEL)" >&2
+    if [[ "$LIB" == zlib-ng || "$LIB" == zstd-zlib-ng ]] && [[ -n "$LEVEL" ]] && ! [[ "$LEVEL" =~ ^[1-9]\+?$ ]]; then
+        echo "Error: --level must be 1-9 or 1+-9+ for zlib-ng (got: $LEVEL)" >&2
         exit 1
     fi
     if [[ "$LIB" == zstd* && -z "$ZSTD_TARGETS" ]]; then
