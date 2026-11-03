@@ -1,31 +1,31 @@
-| mgh1 resample | resample_dwi | fslmaths | mrcalc | step | vs gz | final output | intermediate | peak memory |
+| mgh1 resample | resample_dwi | fslmaths | mrcalc | step | time saved vs gz | final output | intermediate | peak memory |
 |---|---|---|---|---|---|---|---|---|
-| gz (system zlib) | 258 s | 192 s | 204 s | 655 s | 1.00× | 2.71 GB | 2.86 GB | 13.6 GB |
-| zstd (one-shot) | 260 s | 78 s | 192 s | 530 s | 1.24× | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
-| zstd (streaming) | 259 s | 71 s | 185 s | 516 s | 1.27× | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
-| zlib-ng (level 6) | 166 s | 138 s | 133 s | 438 s | 1.50× | 2.71 GB | 2.85 GB | 13.6 GB |
-| deflate-py | 172 s | 111 s | 114 s | 398 s | 1.65× | 2.72 GB | 2.86 GB | 20.1 GB |
-| zlib-ng level 2 | 166 s | 104 s | 100 s | 372 s | 1.76× | 2.71 GB | 2.85 GB | 13.6 GB |
-| deflate-py level 1 | 172 s | 91 s | 95 s | 359 s | 1.82× | 2.71 GB | 2.85 GB | 20.1 GB |
-| zstd + zlib-ng level 1, final level 6 | 167 s | 63 s | 126 s | 357 s | 1.84× | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
-| zstd + deflate-py | 171 s | 76 s | 102 s | 350 s | 1.87× | 2.72 GB | 2.85 GB (zstd) | 20.1 GB |
-| zstd + deflate-py level 1 | 171 s | 76 s | 83 s | 331 s | 1.98× | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
-| zlib-ng level 1 | 166 s | 83 s | 78 s | 328 s | 2.00× | 3.20 GB | 3.34 GB | 13.6 GB |
-| zstd + zlib-ng level 2 | 165 s | 63 s | 93 s | 322 s | 2.04× | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
-| nii | 136 s | 43 s | 40 s | 220 s | 2.98× | 6.25 GB | 6.25 GB | 12.3–13.6 GB |
+| gz (system zlib) | 258 s | 192 s | 204 s | 655 s | 0.0% | 2.71 GB | 2.86 GB | 13.6 GB |
+| zstd (one-shot) | 260 s | 78 s | 192 s | 530 s | 19.1% | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
+| zstd (streaming) | 259 s | 71 s | 185 s | 516 s | 21.2% | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
+| zlib-ng (level 6) | 166 s | 138 s | 133 s | 438 s | 33.1% | 2.71 GB | 2.85 GB | 13.6 GB |
+| deflate-py | 172 s | 111 s | 114 s | 398 s | 39.2% | 2.72 GB | 2.86 GB | 20.1 GB |
+| zlib-ng level 2 | 166 s | 104 s | 100 s | 372 s | 43.2% | 2.71 GB | 2.85 GB | 13.6 GB |
+| deflate-py level 1 | 172 s | 91 s | 95 s | 359 s | 45.2% | 2.71 GB | 2.85 GB | 20.1 GB |
+| zstd + zlib-ng level 1, final level 6 | 167 s | 63 s | 126 s | 357 s | 45.5% | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
+| zstd + deflate-py | 171 s | 76 s | 102 s | 350 s | 46.6% | 2.72 GB | 2.85 GB (zstd) | 20.1 GB |
+| zstd + deflate-py level 1 | 171 s | 76 s | 83 s | 331 s | 49.5% | 2.71 GB | 2.85 GB (zstd) | 20.1 GB |
+| zlib-ng level 1 | 166 s | 83 s | 78 s | 328 s | 49.9% | 3.20 GB | 3.34 GB | 13.6 GB |
+| zstd + zlib-ng level 2 | 165 s | 63 s | 93 s | 322 s | 50.8% | 2.71 GB | 2.85 GB (zstd) | 13.6 GB |
+| nii | 136 s | 43 s | 40 s | 220 s | 66.4% | 6.25 GB | 6.25 GB | 12.3–13.6 GB |
 
 zstd (streaming): job 2181343 on cnx176, Nov 3, 2026, `zstd_lib.so` from `0be4b80`, target `dwi_resample_clipped.nii.gz` at zstd level 1. It compressed 6.249 GB to 2.848 GB in 15.4 s (the gz intermediate is 2.855 GB), and mrcalc read it back in 5.7 s with 0 rewinds, after a 128 KB header read on a separate handle. A gz run on the same day (2181342, cnx176) took 657 s with the same per-command times as the gz row and the same 13.6 GB peak, and its final output is byte-identical (2,713,540,498 bytes, md5 ebced6c6…). Read and write calls: 382k and 354k, against 709k and 680k for gz.
 
 zstd + zlib-ng level 1, final level 6: job 2182019, Nov 3, 2026, `--lib zstd-zlib-ng --final-targets '*__dwi_resampled.nii.gz'` (`zstd_lib.so` with the level hook from 2181985, `bin/zlib-ng-l1` from Oct 6). mrcalc's final output went to zlib-ng at level 6 (2,707,486,489 bytes, 0.2% under gz). zlib-ng level 2: job 2182020, `bin/zlib-ng-l2` (2181986, default level 2): mrcalc wrote the final output at level 2 in 100 s at the same size as level 6 (2,709,855,688 bytes), and fslmaths's intermediate is 2,849,260,064 bytes (gz: 2,855,406,789). In both, nibabel's `dwi_resample.nii.gz` stays at the level 1 it asks for and grows to 3,344,582,203 bytes (gz: 2,889,980,208, +16%). With zlib-ng loaded, read and write calls drop to 55k and 43k (zlib-ng's larger gz buffers). zstd + zlib-ng level 2: job 2182205, `--lib zstd-zlib-ng --level 2`, no final targets: mrcalc wrote the final output at level 2 (2,709,855,688 bytes, the same as 2182020) in 93 s, 7 s less than with zlib-ng level 2 alone because it reads the zstd intermediate.
 
-| mgh1 minimal pipeline | runs | wall | vs none | DTI_Metrics end | FODF_Metrics end | DWI behind T1 | task time | CPU-h | final outputs | work-dir images |
+| mgh1 minimal pipeline | runs | wall | time saved vs none | DTI_Metrics end | FODF_Metrics end | DWI behind T1 | task time | CPU-h | final outputs | work-dir images |
 |---|---|---|---|---|---|---|---|---|---|---|
-| none (system zlib) | 2 | 2272 s | 1.00× | 1796 s | 2169 s | 597 s | 1.12 h | 2.14 | 10.15 GB | 35.13 GB |
-| zlib-ng (level 6) | 1 | 1839 s | 1.24× | 1377 s | 1726 s | 162 s | 0.97 h | 2.00 | 10.97 GB | 37.24 GB |
-| deflate-py | 2 | 1839 s | 1.24× | 1374 s | 1736 s | 168 s | 0.98 h | 2.00 | 10.03 GB | 34.85 GB |
-| deflate-py level 1 | 1 | 1807 s | 1.26× | 1332 s | 1694 s | 126 s | 0.96 h | 1.98 | 10.04 GB | 34.86 GB |
-| deflate-all level 1 | 1 | 1762 s | 1.29× | 1298 s | 1659 s | 80 s | 0.96 h | 1.98 | 10.04 GB | 34.86 GB |
-| zlib-ng level 1 | 1 | 1692 s | 1.34× | 1222 s | 1569 s | 6 s | 0.92 h | 1.95 | 11.80 GB | 40.39 GB |
+| none (system zlib) | 2 | 2272 s | 0.0% | 1796 s | 2169 s | 597 s | 1.12 h | 2.14 | 10.15 GB | 35.13 GB |
+| zlib-ng (level 6) | 1 | 1839 s | 19.1% | 1377 s | 1726 s | 162 s | 0.97 h | 2.00 | 10.97 GB | 37.24 GB |
+| deflate-py | 2 | 1839 s | 19.1% | 1374 s | 1736 s | 168 s | 0.98 h | 2.00 | 10.03 GB | 34.85 GB |
+| deflate-py level 1 | 1 | 1807 s | 20.5% | 1332 s | 1694 s | 126 s | 0.96 h | 1.98 | 10.04 GB | 34.86 GB |
+| deflate-all level 1 | 1 | 1762 s | 22.4% | 1298 s | 1659 s | 80 s | 0.96 h | 1.98 | 10.04 GB | 34.86 GB |
+| zlib-ng level 1 | 1 | 1692 s | 25.5% | 1222 s | 1569 s | 6 s | 0.92 h | 1.95 | 11.80 GB | 40.39 GB |
 
 | mgh1 pipeline step realtime | Resample_DWI | N4_DWI | Extract_DTI_Shell | Extract_FODF_Shell | DTI_Metrics | FODF_Metrics | sum |
 |---|---|---|---|---|---|---|---|
