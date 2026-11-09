@@ -14,6 +14,7 @@ while [[ $# -gt 0 ]]; do
         --level)    LEVEL="$2"; shift 2 ;;
         --debug)    DEBUG=true; shift ;;
         --zstd-targets) ZSTD_TARGETS="$2"; shift 2 ;;
+        --final-targets) FINAL_TARGETS="$2"; shift 2 ;;
         --ssd)      SSD=true; shift ;;
         --help|-h)  sed -n '/^#[S!]/d; /^#/,/^$/{ s/^# \?//; p }' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -21,7 +22,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DATASET" ]]; then
-    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--ssd]" >&2
+    echo "Usage: sbatch $0 --dataset NAME [--pipeline minimal|full|default] [--lib MODE] [--level N] [--debug] [--zstd-targets GLOBS] [--final-targets GLOBS] [--ssd]" >&2
     exit 1
 fi
 check_lib_options
@@ -33,14 +34,22 @@ case "$PIPELINE" in
                        --run_pft_tracking false --run_local_tracking false) ;;
     full)
         pipeline_args=(--run_pft_tracking false --run_eddy false) ;;
+    default)
+        # TractoFlow's own defaults: DWI denoising, topup (for subjects with a
+        # rev_b0), eddy and PFT tracking on; T1 denoising and local tracking off
+        pipeline_args=() ;;
     *)
-        echo "Error: --pipeline must be minimal or full (got: $PIPELINE)" >&2
+        echo "Error: --pipeline must be minimal, full or default (got: $PIPELINE)" >&2
         exit 1 ;;
 esac
 
+# default only adds the profile (eddy on CUDA), keeping TractoFlow's tracking
 if [[ "$GPU" == true ]]; then
-    pipeline_args+=(-profile use_gpu --run_local_tracking true --local_seeding npv
-                    --local_nbr_seeds 15 --local_batch_size_gpu 40000)
+    pipeline_args+=(-profile use_gpu)
+    if [[ "$PIPELINE" != default ]]; then
+        pipeline_args+=(--run_local_tracking true --local_seeding npv
+                        --local_nbr_seeds 15 --local_batch_size_gpu 40000)
+    fi
 fi
 
 # ── Paths ───────────────────────────────────────────────────────────────────
@@ -114,5 +123,11 @@ NXF_VER=21.04.0 nextflow run "$tractoflow_dir/main.nf" \
 
 elapsed=$(( $(date +%s) - start_ts ))
 echo "Total wall time: ${elapsed}s ($((elapsed / 60))m $((elapsed % 60))s)"
+
+# build_io_map.py's other inputs; with --ssd the work dir is gone at exit
+if [[ "$LIB" == logger && "$SSD" == false ]]; then
+    "$lib_dir/scripts/save_io_map_inputs.sh" "$output_dir" "$work_dir" "$results_dir" ||
+        echo "Warning: save_io_map_inputs.sh failed" >&2
+fi
 
 print_summary

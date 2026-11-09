@@ -1,0 +1,106 @@
+# Builds every library and runs the tests that need no HPC system: the
+# buffer_lib and logger smoke tests, zstd_lib's round-trip suite (also against
+# the zstd 1.4.8 header the TractoFlow container ships, and under ASan/UBSan
+# and TSan), and compression_lib's gz read and Python stream checks. The Slurm
+# and Nextflow scripts only get a syntax check.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zlib1g-dev libzstd-dev libdeflate-dev zstd
+
+      - name: Build
+        run: make all zstd_lib.so test_zstd_stream compression_lib.so test_gz_read
+
+      - name: buffer_lib smoke test
+        run: |
+          LD_PRELOAD=$PWD/bin/buffer_lib.so BUFFER_WRITE_TARGETS=test BUFFER_PREFETCH_TARGETS=test \
+            BUFFER_LOG_FILE=$RUNNER_TEMP/buffer.log ./bin/test
+          grep '_stats' "$RUNNER_TEMP/buffer.log"
+          grep -q '^.*write_stats intercepted calls=[1-9]' "$RUNNER_TEMP/buffer.log"
+
+      - name: logger smoke test
+        run: |
+          # The log path is fixed: /mnt is the repo inside the container
+          sudo install -m 666 /dev/null /mnt/logger.log
+          LD_PRELOAD=$PWD/bin/logger.so cat Makefile > /dev/null
+          grep -q "Initializing logger library - exe='/usr/bin/cat'" /mnt/logger.log
+          grep -q "Makefile" /mnt/logger.log
+
+      - name: zstd_lib tests
+        run: LD_PRELOAD=$PWD/bin/zstd_lib.so ./bin/test_zstd_stream
+
+      - name: zstd_lib against the zstd 1.4.8 header
+        run: |
+          mkdir -p "$RUNNER_TEMP/zstd148"
+          curl -fsSL -o "$RUNNER_TEMP/zstd148/zstd.h" https://raw.githubusercontent.com/facebook/zstd/v1.4.8/lib/zstd.h
+          gcc -shared -fPIC -Wall -Werror -O2 -pthread -I"$RUNNER_TEMP/zstd148" \
+            -o "$RUNNER_TEMP/zstd_lib_148.so" src/zstd_lib.c -ldl -lzstd
+
+      - name: compression_lib gz reads
+        run: |
+          ./bin/test_gz_read
+          COMPRESSION_READS=1 LD_PRELOAD=$PWD/bin/compression_lib.so ./bin/test_gz_read
+
+      - name: compression_lib Python streams
+        run: |
+          LD_PRELOAD=$PWD/bin/compression_lib.so python3 tests/test_deflate_stream.py
+          COMPRESSION_STREAMS=1 LD_PRELOAD=$PWD/bin/compression_lib.so python3 tests/test_deflate_stream.py
+
+      - name: Script syntax
+        run: |
+          git ls-files '*.sh' | xargs -n1 bash -n
+          git ls-files '*.py' | xargs python3 -m py_compile
+
+  sanitizers:
+    name: zstd_lib under ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan and UBSan
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined
+          - name: TSan
+            flags: -fsanitize=thread
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zlib1g-dev libzstd-dev zstd
+
+      # TSan's shadow memory doesn't fit the runners' 32-bit mmap randomization
+      - name: Lower ASLR entropy
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      # The library is linked into the test, so the sanitizer sees both
+      - name: Build and run
+        env:
+          SKIP_4GB: 1
+        run: |
+          mkdir -p bin
+          gcc -g -O1 -pthread ${{ matrix.flags }} -o bin/test_zstd_stream_san \
+            tests/test_zstd_stream.c src/zstd_lib.c -ldl -lzstd -lz
+          ./bin/test_zstd_stream_san

@@ -9,13 +9,15 @@
 #SBATCH --job-name=tractoflow_gpu
 #SBATCH --no-requeue
 
-# TractoFlow on an A100 node: run_tractoflow.sh with the use_gpu profile and
-# GPU local tracking (npv seeding, 15 seeds, batch size 40000). Takes the same
-# options as run_tractoflow.sh.
+# TractoFlow on an A100 node: run_tractoflow.sh with the use_gpu profile (eddy
+# on CUDA). minimal and full also turn on GPU local tracking (npv seeding, 15
+# seeds, batch size 40000); default keeps TractoFlow's own tracking (PFT on
+# CPU, no local tracking). Takes the same options as run_tractoflow.sh.
 #
 # Usage:
 #   sbatch run_tractoflow_gpu.sh --dataset mgh1 --pipeline full
 #   sbatch run_tractoflow_gpu.sh --dataset mgh1 --pipeline full --lib buffer
+#   sbatch run_tractoflow_gpu.sh --dataset Penthera_3T --pipeline default --lib logger
 
 set -euo pipefail
 GPU=true

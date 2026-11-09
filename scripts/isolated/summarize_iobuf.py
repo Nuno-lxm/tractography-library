@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Summarise bench_iobuf CSVs: median time per buffer size, and speed relative
-to each library's default buffer (8 KB for system zlib, 128 KB for zlib-ng and
+"""Summarise bench_iobuf CSVs: median time per buffer size, and the time saved
+against each library's default buffer (8 KB for system zlib, 128 KB for zlib-ng and
 zstd), for every variant, location, process count and direction.
 
 Usage: summarize_iobuf.py all.csv [more.csv ...] > summary.md
@@ -38,7 +38,7 @@ def main(paths):
 
     print("# I/O buffer size benchmark\n")
     print("Median of all runs (all processes and repetitions) per buffer size. "
-          "Speed-up is against the library's default buffer: above 1.00 is faster. "
+          "Time saved is against the library's default buffer: positive is faster, negative slower. "
           "Spread is min-max of the times. MB/s is per process, on uncompressed bytes.\n")
     for key in sorted(groups):
         variant, where, procs, mode, op = key
@@ -49,17 +49,17 @@ def main(paths):
         base_median = statistics.median(s for s, _, _ in by_size[base]) if base in by_size else None
 
         print(f"## {variant} · {where} · {procs} process{'es' if procs > 1 else ''} · {op}\n")
-        print("| Buffer | Median time (s) | Spread (s) | MB/s | Speed-up vs default | Syscalls |")
+        print("| Buffer | Median time (s) | Spread (s) | MB/s | Time saved vs default | Syscalls |")
         print("| --- | --- | --- | --- | --- | --- |")
         for size in sorted(by_size):
             times = [s for s, _, _ in by_size[size]]
             median = statistics.median(times)
             mbps = statistics.median(m for _, m, _ in by_size[size])
             calls = by_size[size][0][2]
-            ratio = f"{base_median / median:.2f}" if base_median else "n/a"
+            saved = f"{100 * (1 - median / base_median):+.1f}%" if base_median else "n/a"
             mark = " (default)" if size == base else ""
             print(f"| {human(size)}{mark} | {median:.3f} | {min(times):.3f}-{max(times):.3f} | "
-                  f"{mbps:.1f} | {ratio} | {calls if calls >= 0 else '-'} |")
+                  f"{mbps:.1f} | {saved} | {calls if calls >= 0 else '-'} |")
         print()
 
 

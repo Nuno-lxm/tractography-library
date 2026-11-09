@@ -26,8 +26,8 @@
 #   -l  where the files go: lustre and/or local (default "lustre local")
 #   -v  variants (default "zlib-L6 zlib-L1 zlibng-L1 zstd-L3 zstd-L1"):
 #         zlib-LN    system zlib, gz API, level N
-#         zlibng-L1  zlib-ng drop-in from bin/zlib-ng-l1 (build_zlib_ng.sh 1), level 1
-#         zlibng-L6  zlib-ng drop-in from bin/zlib-ng, level 6
+#         zlibng-LN  zlib-ng drop-in from bin/zlib-ng (build_zlib_ng.sh), level N;
+#                    the level goes in gzopen's mode, so one build serves every level
 #         zstd-LN    zstd streaming, level N
 #   -c  bytes per gzwrite/gzread call (default 0 = whole image; 8192 mimics small calls)
 #
@@ -100,8 +100,7 @@ for variant in $BENCH_VARIANTS; do
     preload=""
     case "$variant" in
         zlib-L*)   mode=gz;   level=${variant#zlib-L} ;;
-        zlibng-L1) mode=gz;   level=1; preload=/mnt/bin/zlib-ng-l1/libz.so.1 ;;
-        zlibng-L6) mode=gz;   level=6; preload=/mnt/bin/zlib-ng/libz.so.1 ;;
+        zlibng-L*) mode=gz;   level=${variant#zlibng-L}; preload=/mnt/bin/zlib-ng/libz.so.1 ;;
         zstd-L*)   mode=zstd; level=${variant#zstd-L} ;;
         *) echo "Unknown variant $variant, skipped"; continue ;;
     esac

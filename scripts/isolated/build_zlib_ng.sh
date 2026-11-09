@@ -14,13 +14,15 @@
 # With a LEVEL argument the default compression level (6) becomes LEVEL, at
 # bin/zlib-ng-lLEVEL/libz.so.1 (--lib zlib-ng --level LEVEL). FSL and MRtrix
 # open gz files without a level, so they get LEVEL; callers that ask for a
-# level (nibabel asks for 1) keep theirs.
+# level (nibabel asks for 1) keep theirs. LEVEL+ (e.g. 2+, at bin/zlib-ng-l2+)
+# also raises the levels 1 to LEVEL-1 that callers ask for to LEVEL, so
+# nibabel's level 1 becomes 2; level 0 (stored) stays.
 # The source is fetched on the login node, which has network access:
 #   curl -fL https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz |
 #       tar xz -C /projects/I20240002/nunolxm/tractoflow_files
 #
 # Usage:
-#   sbatch build_zlib_ng.sh [LEVEL]
+#   sbatch build_zlib_ng.sh [LEVEL[+]]
 
 set -euo pipefail
 
@@ -29,12 +31,14 @@ lib_dir="$project_dir/tractography-library"
 container="$project_dir/tractoflow_files/scilus_1.6.0.sif"
 src="$project_dir/tractoflow_files/zlib-ng-2.3.3"
 
-export DEFAULT_LEVEL="${1:-}"
-if [[ -n "$DEFAULT_LEVEL" ]] && ! [[ "$DEFAULT_LEVEL" =~ ^[1-9]$ ]]; then
-    echo "Error: LEVEL must be 1-9 (got: $DEFAULT_LEVEL)" >&2
+level_arg="${1:-}"
+if [[ -n "$level_arg" ]] && ! [[ "$level_arg" =~ ^[1-9]\+?$ ]]; then
+    echo "Error: LEVEL must be 1-9, optionally followed by + (got: $level_arg)" >&2
     exit 1
 fi
-export OUT_DIR="/mnt/bin/zlib-ng${DEFAULT_LEVEL:+-l$DEFAULT_LEVEL}"
+export DEFAULT_LEVEL="${level_arg%+}"
+export RAISE_LEVELS=$([[ "$level_arg" == *+ ]] && echo 1 || echo 0)
+export OUT_DIR="/mnt/bin/zlib-ng${level_arg:+-l$level_arg}"
 
 if [[ ! -f "$src/configure" ]]; then
     echo "Error: $src missing; see the fetch command in $0" >&2
@@ -57,6 +61,12 @@ if [[ -n "$DEFAULT_LEVEL" ]]; then
     sed -i "s/^\( *level = \)6;$/\1$DEFAULT_LEVEL;/" deflate.c
     echo "Default level: $DEFAULT_LEVEL"
 fi
+if [[ "$RAISE_LEVELS" == 1 ]]; then
+    # Right after each default, so deflateInit2 and deflateParams both raise
+    sed -i "s/^\( *level = $DEFAULT_LEVEL;\)$/\1\n    if (level >= 1 \&\& level < $DEFAULT_LEVEL) level = $DEFAULT_LEVEL;/" deflate.c
+    [[ $(grep -c "^    if (level >= 1 && level < $DEFAULT_LEVEL) level = $DEFAULT_LEVEL;$" deflate.c) == 2 ]] || { echo "Error: level raise not added to deflate.c"; exit 1; }
+    echo "Levels 1-$((DEFAULT_LEVEL - 1)) raised to $DEFAULT_LEVEL"
+fi
 ./configure --zlib-compat
 make -j"${SLURM_CPUS_PER_TASK:-4}" >/dev/null
 
@@ -78,5 +88,9 @@ print("python zlib runtime under preload:", zlib.ZLIB_RUNTIME_VERSION)
 level = int(os.environ["DEFAULT_LEVEL"] or 6)
 assert zlib.compress(data) == zlib.compress(data, level)
 print("default level:", level)
+if os.environ["RAISE_LEVELS"] == "1":
+    assert all(zlib.compress(data, l) == zlib.compress(data, level) for l in range(1, level))
+    assert zlib.compress(data, 0) != zlib.compress(data, level)
+    print(f"levels 1-{level - 1} give level {level}, level 0 stays stored")
 PY
 EOF
