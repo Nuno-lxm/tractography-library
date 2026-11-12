@@ -1,5 +1,5 @@
 #!/bin/bash
-# Save the two run-dir inputs of build_io_map.py that the logger can't see:
+# Save the three run-dir inputs of build_io_map.py that the logger can't see:
 #   staged_inputs_<run>.tsv    task (with its tag), staged copy (relative to
 #                              the project dir), source; from the nxf_stage
 #                              function of each task's .command.run
@@ -8,6 +8,10 @@
 #   results_listing_<run>.txt  published path (relative to the project dir),
 #                              link target; every symlink under the results
 #                              dir (the final-output set)
+#   renames_<run>.tsv          task dir (relative to the project dir), old
+#                              name, new name; every two-argument mv line of
+#                              the task scripts (mv calls renameat, which the
+#                              logger doesn't hook)
 # <run> is the basename of OUTPUT_DIR (<test>_<jobid>). run_tractoflow*.sh
 # calls this after --lib logger runs; run it by hand for older runs.
 #
@@ -50,5 +54,15 @@ find "$work_dir" -name .command.run -exec awk -v root="$project_dir" '
 listing="$output_dir/results_listing_$run.txt"
 find "$results_dir" -type l -printf '%p\t%l\n' | sed "s|^$project_dir/||" > "$listing"
 
+renames="$output_dir/renames_$run.tsv"
+find "$work_dir" -name .command.sh -exec awk -v root="$project_dir" '
+    FNR == 1 {
+        dir = FILENAME; sub(/\/[^\/]*$/, "", dir)
+        if (index(dir, root "/") == 1) dir = substr(dir, length(root) + 2)
+    }
+    $1 == "mv" && NF == 3 { print dir "\t" $2 "\t" $3 }
+' {} + > "$renames"
+
 echo "Staged inputs: $(wc -l < "$staged") copies -> $staged"
 echo "Results listing: $(wc -l < "$listing") links -> $listing"
+echo "Renames: $(wc -l < "$renames") mv lines -> $renames"

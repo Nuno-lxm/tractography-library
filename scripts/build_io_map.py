@@ -5,7 +5,11 @@ One row per file name (basename with the "<sid>__" prefix stripped). Accesses
 are attributed per process: a process that logged a gzopen of a path went
 through the gz API for every open of that path. Nextflow's staged copies
 (stageInMode 'copy', done outside the container, so not in the log) are mapped
-back to their source with the staged_inputs table.
+back to their source with the staged_inputs table. A file renamed into
+another name (the task scripts' mv lines, from the renames table, plus the
+rename() calls in the log; mv itself calls renameat, which the logger doesn't
+hook) is only eligible when every name it is renamed into is: fast's
+t1_pve_2.nii.gz becomes the published map_wm.nii.gz.
 
 Usage:
   scripts/build_io_map.py --log logs/logger_2083793.log \
@@ -70,6 +74,12 @@ def read_staged(path, project_dir):
             task, copy, source = line.rstrip("\n").split("\t")
             staged[os.path.join(project_dir, copy)] = source
     return staged
+
+
+def read_renames(path):
+    """(old, new) of each mv line in the task scripts."""
+    with open(path) as f:
+        return [tuple(line.rstrip("\n").split("\t")[1:3]) for line in f if line.strip()]
 
 
 def read_published(path):
@@ -168,8 +178,14 @@ def parse_log(log_path):
     return access, procs, renames, unresolved_dirfd
 
 
+def name_key(path):
+    return SID_RE.sub("", os.path.basename(path))
+
+
 def build_map(access, renames, tasks, staged, published, project_dir):
+    """renames: (old, new) paths or names."""
     published = {canonical(p, staged) for p in published}
+    published_keys = {name_key(p) for p in published}
     files = defaultdict(list)       # canonical path -> accesses
     for (pid, path), a in access.items():
         a = dict(a, pid=pid, task=task_of(a["cwd"], tasks) or "?", family=family(a["exe"]))
@@ -177,11 +193,15 @@ def build_map(access, renames, tasks, staged, published, project_dir):
 
     rows = defaultdict(lambda: {"paths": set(), "accesses": []})
     for path, accs in files.items():
-        key = SID_RE.sub("", os.path.basename(path))
+        key = name_key(path)
         rows[key]["paths"].add(path)
         rows[key]["accesses"].extend(accs)
 
-    renamed_to = {SID_RE.sub("", os.path.basename(new)) for _, _, new in renames}
+    renamed_into = {name_key(new) for _, new in renames}
+    dests = defaultdict(set)        # name -> names it is renamed into
+    for old, new in renames:
+        if name_key(old) != name_key(new):
+            dests[name_key(old)].add(name_key(new))
     out = []
     for key in sorted(rows):
         paths, accs = rows[key]["paths"], rows[key]["accesses"]
@@ -221,12 +241,37 @@ def build_map(access, renames, tasks, staged, published, project_dir):
             "writers": ", ".join(sorted({fmt(a) for a in writers})) or "-",
             "readers": ", ".join(sorted({fmt(a) for a in readers})) or "-",
             "families": "/".join(sorted(fams)),
-            "renamed_into": key in renamed_to,
+            "renamed_into": key in renamed_into,
+            "renamed_to": ",".join(sorted(dests[key])),
             "eligible": not strict,
             "reason": "; ".join(strict),
             "eligible_loose": not loose,
             "reason_loose": "; ".join(loose),
         })
+
+    # The data written under a name ends up under every name it's renamed into,
+    # so a name is only eligible when those are. Their own missing writer is the
+    # rename itself, so it doesn't count
+    by_key = {r["file"]: r for r in out}
+
+    def blocked(name, col, seen):
+        for d in dests.get(name, ()):
+            if d in seen:
+                continue
+            seen.add(d)
+            r = by_key.get(d)
+            own = (r["reason" if col == "eligible" else "reason_loose"].split("; ") if r
+                   else ["published"] if d in published_keys else [])
+            if [x for x in own if x and x != "no writer in log"] or blocked(d, col, seen):
+                return d
+        return None
+
+    for r in out:
+        for col, reason in (("eligible", "reason"), ("eligible_loose", "reason_loose")):
+            d = blocked(r["file"], col, {r["file"]})
+            if d:
+                r[col] = False
+                r[reason] = "; ".join(filter(None, [r[reason], f"renamed into {d}"]))
     return out
 
 
@@ -272,7 +317,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--log", required=True, help="full logger.so log of the run")
     ap.add_argument("--run-dir", required=True,
-                    help="run output dir holding trace_*.txt, staged_inputs_*.tsv and results_listing_*.txt")
+                    help="run output dir holding trace_*.txt, staged_inputs_*.tsv, results_listing_*.txt and renames_*.tsv")
     ap.add_argument("--project-dir", default="/projects/I20240002/nunolxm",
                     help="root the staged_inputs copy paths are relative to")
     ap.add_argument("--out", help="write the map as TSV here (default: stdout only)")
@@ -288,12 +333,14 @@ def main():
     tasks = read_tasks(trace)
     staged = read_staged(one("staged_inputs_*.tsv"), args.project_dir)
     published = read_published(one("results_listing_*.txt"))
+    mv_renames = read_renames(one("renames_*.tsv"))
 
-    access, procs, renames, unresolved = parse_log(args.log)
+    access, procs, log_renames, unresolved = parse_log(args.log)
+    renames = [(old, new) for _, old, new in log_renames] + mv_renames
     rows = build_map(access, renames, tasks, staged, published, args.project_dir)
 
     cols = ["file", "names", "n_paths", "size_bytes", "published", "writers", "readers",
-            "families", "renamed_into", "eligible", "reason", "eligible_loose", "reason_loose"]
+            "families", "renamed_into", "renamed_to", "eligible", "reason", "eligible_loose", "reason_loose"]
     if args.out:
         with open(args.out, "w") as f:
             w = csv.DictWriter(f, fieldnames=cols, delimiter="\t", extrasaction="ignore")
@@ -302,7 +349,8 @@ def main():
         print(f"map: {args.out} ({len(rows)} names)")
 
     print(f"processes: {len(procs)}, .nii.gz accesses (pid, path): {len(access)}, "
-          f"renames: {len(renames)}, relative openat with a dirfd: {unresolved}")
+          f"renames: {len(log_renames)} in the log, {len(mv_renames)} mv lines, "
+          f"relative openat with a dirfd: {unresolved}")
     no_task = {a["exe"] for a in access.values() if not task_of(a["cwd"], tasks)}
     if no_task:
         print(f"accesses outside a task dir, by: {', '.join(sorted(no_task))}")
@@ -316,8 +364,10 @@ def main():
     print(f"tool-written .nii.gz still on disk: {written / 1e9:.3f} GB; "
           f"trace write_bytes (all tasks): {trace_write_bytes(trace) / 1e9:.3f} GB")
 
-    missing = [r["file"] for r in rows if r["reason"].startswith("no writer in log")]
-    print(f"\nno writer in log: {', '.join(missing) or 'none'}")
+    missing = [r["file"] for r in rows if r["reason"].startswith("no writer in log") and not r["renamed_into"]]
+    print(f"\nno writer in log (and not renamed into): {', '.join(missing) or 'none'}")
+    moved = [f"{r['file']} -> {r['renamed_to']}" for r in rows if r["renamed_to"]]
+    print(f"renamed: {', '.join(moved) or 'none'}")
     bad = [r["file"] for r in rows if r["published"] and r["eligible"]]
     if bad:
         print(f"ERROR: published files marked eligible: {', '.join(bad)}")
